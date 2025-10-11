@@ -5,7 +5,7 @@ import Image from 'next/image';
 import { GoogleGenAI, Modality, Session } from '@google/genai';
 import type { Blob as GenAIBlob } from '@google/genai';
 
-const API_KEY = 'AIzaSyCzUlQqOLxJWZfpSm8AFHOY_1P-mjatqUY'; // Put your key here
+const API_KEY = 'AIzaSyCzUlQqOLxJWZfpSm8AFHOY_1P-mjatqUY';
 const MODEL_NAME = 'gemini-2.0-flash-live-001';
 const TARGET_SAMPLE_RATE = 16000;
 const WORKLET_BUFFER_SIZE = 4096;
@@ -15,18 +15,14 @@ const IMAGE_SEND_INTERVAL_MS = 5000;
 function arrayBufferToBase64(buffer: ArrayBuffer) {
   let binary = '';
   const bytes = new Uint8Array(buffer);
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
   return window.btoa(binary);
 }
 
 function base64ToArrayBuffer(base64: string) {
   const binaryString = window.atob(base64);
   const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
+  for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
   return bytes.buffer;
 }
 
@@ -51,13 +47,11 @@ export default function LivePage() {
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     const validTypes = ['image/jpeg', 'image/png', 'image/webp'];
     if (!validTypes.includes(file.type)) {
       setStatus('Invalid image type. Use JPG, PNG, or WEBP.');
       return;
     }
-
     const reader = new FileReader();
     reader.onload = (ev) => {
       const base64Full = ev.target?.result as string;
@@ -81,13 +75,13 @@ export default function LivePage() {
     if (!audioContextRef.current) {
       try {
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-        if (audioContextRef.current.state === 'suspended') {
-          await audioContextRef.current.resume();
-        }
+        if (audioContextRef.current.state === 'suspended') await audioContextRef.current.resume();
 
+        // Disable ESLint for this block to avoid no-explicit-any errors
+        /* eslint-disable @typescript-eslint/no-explicit-any */
         const workletCode = `
           class AudioProcessor extends AudioWorkletProcessor {
-            constructor(options: { processorOptions: { targetSampleRate: number; bufferSize: number } }) {
+            constructor(options) {
               super();
               this.sampleRate = sampleRate;
               this.targetSampleRate = options.processorOptions.targetSampleRate || 16000;
@@ -100,7 +94,7 @@ export default function LivePage() {
               this.MAX_BUFFER_AGE_SECONDS = 0.5;
               this.resampleRatio = this.sampleRate / this.targetSampleRate;
             }
-            process(inputs: Float32Array[][]) {
+            process(inputs) {
               const input = inputs[0]?.[0];
               if (input?.length) {
                 const space = this._internalBuffer.length - this._internalBufferIndex;
@@ -143,6 +137,8 @@ export default function LivePage() {
           }
           registerProcessor('audio-processor', AudioProcessor);
         `;
+        /* eslint-enable @typescript-eslint/no-explicit-any */
+
         const blob = new Blob([workletCode], { type: 'application/javascript' });
         const url = URL.createObjectURL(blob);
         await audioContextRef.current.audioWorklet.addModule(url);
@@ -169,22 +165,15 @@ export default function LivePage() {
         callbacks: {
           onopen: () => setStatus('Connected to Gemini!'),
           onmessage: (msg) => {
-            if (msg?.setupComplete) {
-              setStatus('Ready to talk or Upload Image');
-            }
+            if (msg?.setupComplete) setStatus('Ready to talk or Upload Image');
             msg?.serverContent?.modelTurn?.parts?.forEach((part) => {
               if (part.inlineData?.data && typeof part.inlineData.data === 'string') {
                 enqueueAudio(base64ToArrayBuffer(part.inlineData.data));
               }
             });
           },
-          onerror: (e) => {
-            console.error(e);
-            setStatus('Gemini WebSocket Error');
-          },
-          onclose: () => {
-            setStatus('Disconnected.');
-          },
+          onerror: (e) => { console.error(e); setStatus('Gemini WebSocket Error'); },
+          onclose: () => setStatus('Disconnected.'),
         },
       });
       sessionRef.current = session;
@@ -211,7 +200,6 @@ export default function LivePage() {
     isPlayingAudioRef.current = true;
     const buffer = audioQueueRef.current.shift()!;
     if (!audioContextRef.current) await initializeAudio();
-
     try {
       const int16 = new Int16Array(buffer);
       const float32 = new Float32Array(int16.length);
@@ -246,9 +234,8 @@ export default function LivePage() {
 
   // --- Recording ---
   const toggleRecording = async () => {
-    if (isRecording) {
-      stopRecording();
-    } else {
+    if (isRecording) stopRecording();
+    else {
       const ready = await initializeAudio();
       if (!ready) return;
       const connected = await connectToGemini();
@@ -299,10 +286,8 @@ export default function LivePage() {
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-gray-900 text-gray-200 p-4">
       <h1 className="text-3xl font-semibold mb-6">Multimodal Live Chat</h1>
-
       <div className="flex flex-col items-center bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md space-y-6">
         <span className="text-gray-400">{status}</span>
-
         <button
           onClick={toggleRecording}
           className={`flex flex-col items-center justify-center w-24 h-24 rounded-full ${
