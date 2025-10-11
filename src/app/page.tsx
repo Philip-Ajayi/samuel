@@ -1,324 +1,337 @@
-"use client";
+'use client';
 
-import React, { useState, useEffect } from 'react';
-import { Power, AlertTriangle, CheckCircle, Clock, Zap, Activity } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { GoogleGenAI, Modality, Session } from '@google/genai';
+import type { Blob as GenAIBlob } from '@google/genai';
 
-interface Feeder {
-  id: string;
-  name: string;
-  band: string;
-  status: 'online' | 'offline' | 'maintenance' | 'alarm';
-  voltage: number;
-  current: number;
-  load: number;
-  availability: number;
-  lastOutage: string;
-  totalOutages: number;
-  customers: number;
-  location: string;
+const API_KEY = 'AIzaSyCzUlQqOLxJWZfpSm8AFHOY_1P-mjatqUY'; // Put your key here
+const MODEL_NAME = 'gemini-2.0-flash-live-001';
+const TARGET_SAMPLE_RATE = 16000;
+const WORKLET_BUFFER_SIZE = 4096;
+const IMAGE_SEND_INTERVAL_MS = 5000;
+
+// Helpers
+function arrayBufferToBase64(buffer: ArrayBuffer) {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return window.btoa(binary);
 }
 
-const ElectricityDashboard: React.FC = () => {
-  // Set currentTime initially null to prevent SSR/client mismatch
-  const [currentTime, setCurrentTime] = useState<Date | null>(null);
-  
-  const [feeders, setFeeders] = useState<Feeder[]>([
-    {
-      id: 'OSL-11KV',
-      name: 'Osolo 11kV Feeder',
-      band: 'Band A',
-      status: 'online',
-      voltage: 11.0,
-      current: 265,
-      load: 72,
-      availability: 98.8,
-      lastOutage: '4 days ago',
-      totalOutages: 3,
-      customers: 1650,
-      location: 'Osolo Estate, Isolo'
-    },
-    {
-      id: 'ASW-11KV', 
-      name: 'Aswani 11kV Feeder',
-      band: 'Band A',
-      status: 'online',
-      voltage: 10.9,
-      current: 240,
-      load: 68,
-      availability: 98.5,
-      lastOutage: '5 days ago',
-      totalOutages: 4,
-      customers: 1820,
-      location: 'Aswani Market Area, Isolo'
-    },
-    {
-      id: 'ADM-11KV',
-      name: 'Ademulegun 11kV Feeder',
-      band: 'Band B',
-      status: 'online',
-      voltage: 11.1,
-      current: 180,
-      load: 55,
-      availability: 96.2,
-      lastOutage: '2 days ago',
-      totalOutages: 8,
-      customers: 1100,
-      location: 'Ademulegun Street, Isolo'
-    },
-    {
-      id: 'IBX-11KV',
-      name: 'Ibalex 11kV Feeder',
-      band: 'Band C',
-      status: 'alarm',
-      voltage: 10.3,
-      current: 420,
-      load: 96,
-      availability: 94.8,
-      lastOutage: '1 hour ago',
-      totalOutages: 12,
-      customers: 950,
-      location: 'Ibalex Industrial Area, Isolo'
-    },
-    {
-      id: 'IRE-11KV',
-      name: 'Ire-Akari 11kV Feeder',
-      band: 'Band C',
-      status: 'maintenance',
-      voltage: 0,
-      current: 0,
-      load: 0,
-      availability: 93.5,
-      lastOutage: 'Now (Scheduled)',
-      totalOutages: 15,
-      customers: 720,
-      location: 'Ire-Akari Estate, Isolo'
+function base64ToArrayBuffer(base64: string) {
+  const binaryString = window.atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+export default function LivePage() {
+  const [status, setStatus] = useState('Ready');
+  const [isRecording, setIsRecording] = useState(false);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [currentImageBase64, setCurrentImageBase64] = useState<string | null>(null);
+  const [currentImageMimeType, setCurrentImageMimeType] = useState<string | null>(null);
+
+  const sessionRef = useRef<Session | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const micNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const audioQueueRef = useRef<ArrayBuffer[]>([]);
+  const isPlayingAudioRef = useRef(false);
+  const imageIntervalRef = useRef<number | null>(null);
+  const genAIRef = useRef(new GoogleGenAI({ apiKey: API_KEY, apiVersion: 'v1alpha' }));
+
+  // --- UI Handlers ---
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const validTypes = ['image/jpeg', 'image/png', 'image/webp'];
+    if (!validTypes.includes(file.type)) {
+      setStatus('Invalid image type. Use JPG, PNG, or WEBP.');
+      return;
     }
-  ]);
 
-  // Update time every second only after mount
-  useEffect(() => {
-    setCurrentTime(new Date()); // Set initial time on client mount
-    const timer = setInterval(() => {
-      setCurrentTime(new Date());
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const base64Full = ev.target?.result as string;
+      setCurrentImageBase64(base64Full.split(',')[1]);
+      setCurrentImageMimeType(file.type);
+      setImagePreview(base64Full);
+      setStatus('Image loaded. Will be sent periodically.');
+    };
+    reader.readAsDataURL(file);
+  };
 
-  // Simulate real-time data updates
-  useEffect(() => {
-    const updateInterval = setInterval(() => {
-      setFeeders(prevFeeders => 
-        prevFeeders.map(feeder => ({
-          ...feeder,
-          voltage: feeder.status === 'online' ? 
-            Math.max(10.5, Math.min(11.5, feeder.voltage + (Math.random() - 0.5) * 0.2)) : 
-            feeder.voltage,
-          current: feeder.status === 'online' ? 
-            Math.max(0, feeder.current + (Math.random() - 0.5) * 20) : 
-            feeder.current,
-          load: feeder.status === 'online' ? 
-            Math.max(0, Math.min(100, feeder.load + (Math.random() - 0.5) * 5)) : 
-            feeder.load
-        }))
-      );
-    }, 3000);
-    
-    return () => clearInterval(updateInterval);
-  }, []);
+  const removeImage = () => {
+    setCurrentImageBase64(null);
+    setCurrentImageMimeType(null);
+    setImagePreview(null);
+    setStatus('Image removed.');
+  };
 
-  const getStatusColor = (status: Feeder['status']): string => {
-    switch (status) {
-      case 'online': return 'text-green-600 bg-green-100';
-      case 'offline': return 'text-red-600 bg-red-100';
-      case 'maintenance': return 'text-yellow-600 bg-yellow-100';
-      case 'alarm': return 'text-orange-600 bg-orange-100';
-      default: return 'text-gray-600 bg-gray-100';
+  // --- Audio Helpers ---
+  const initializeAudio = async () => {
+    if (!audioContextRef.current) {
+      try {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        if (audioContextRef.current.state === 'suspended') {
+          await audioContextRef.current.resume();
+        }
+        // Add AudioWorklet
+        const workletCode = `
+          class AudioProcessor extends AudioWorkletProcessor {
+            constructor(options) {
+              super();
+              this.sampleRate = sampleRate;
+              this.targetSampleRate = options.processorOptions.targetSampleRate || 16000;
+              this.bufferSize = options.processorOptions.bufferSize || 4096;
+              const minBuffer = Math.ceil(this.bufferSize * (this.sampleRate / this.targetSampleRate)) + 128;
+              this._internalBuffer = new Float32Array(Math.max(minBuffer, this.bufferSize * 2));
+              this._internalBufferIndex = 0;
+              this.isProcessing = false;
+              this.lastSendTime = currentTime;
+              this.MAX_BUFFER_AGE_SECONDS = 0.5;
+              this.resampleRatio = this.sampleRate / this.targetSampleRate;
+            }
+            process(inputs) {
+              const input = inputs[0]?.[0];
+              if (input?.length) {
+                const space = this._internalBuffer.length - this._internalBufferIndex;
+                const len = Math.min(space, input.length);
+                this._internalBuffer.set(input.slice(0, len), this._internalBufferIndex);
+                this._internalBufferIndex += len;
+              }
+              const minInput = Math.floor(this.bufferSize * this.resampleRatio);
+              const shouldSend = (currentTime - this.lastSendTime > this.MAX_BUFFER_AGE_SECONDS && this._internalBufferIndex > 0)
+                                || this._internalBufferIndex >= minInput;
+              if (shouldSend && !this.isProcessing) this.sendBuffer();
+              return true;
+            }
+            sendBuffer() {
+              if (this._internalBufferIndex === 0) return;
+              this.isProcessing = true;
+              this.lastSendTime = currentTime;
+              const output = new Float32Array(this.bufferSize);
+              let outputIndex = 0;
+              let consumed = 0;
+              for (let i = 0; i < this.bufferSize; i++) {
+                const P = i * this.resampleRatio;
+                const K = Math.floor(P);
+                const T = P - K;
+                if (K + 1 < this._internalBufferIndex) {
+                  output[outputIndex++] = this._internalBuffer[K] * (1 - T) + this._internalBuffer[K + 1] * T;
+                } else if (K < this._internalBufferIndex) {
+                  output[outputIndex++] = this._internalBuffer[K];
+                } else break;
+                consumed = K + 1;
+              }
+              const finalBuffer = output.slice(0, outputIndex);
+              const pcmData = new Int16Array(finalBuffer.length);
+              for (let i = 0; i < finalBuffer.length; i++) pcmData[i] = Math.max(-1, Math.min(1, finalBuffer[i])) * 32767;
+              this.port.postMessage({ pcmData: pcmData.buffer }, [pcmData.buffer]);
+              this._internalBuffer.copyWithin(0, consumed, this._internalBufferIndex);
+              this._internalBufferIndex -= consumed;
+              this.isProcessing = false;
+            }
+          }
+          registerProcessor('audio-processor', AudioProcessor);
+        `;
+        const blob = new Blob([workletCode], { type: 'application/javascript' });
+        const url = URL.createObjectURL(blob);
+        await audioContextRef.current.audioWorklet.addModule(url);
+        URL.revokeObjectURL(url);
+        return true;
+      } catch (err) {
+        setStatus('Audio initialization failed.');
+        console.error(err);
+        return false;
+      }
+    }
+    if (audioContextRef.current.state === 'suspended') await audioContextRef.current.resume();
+    return true;
+  };
+
+  // --- Gemini Connection ---
+  const connectToGemini = async (): Promise<boolean> => {
+    setStatus('Connecting to Gemini...');
+    try {
+      sessionRef.current?.close();
+      const session = await genAIRef.current.live.connect({
+        model: MODEL_NAME,
+        config: { responseModalities: [Modality.AUDIO] },
+        callbacks: {
+          onopen: () => setStatus('Connected to Gemini!'),
+          onmessage: (msg) => {
+            if (msg?.setupComplete) {
+              setStatus('Ready to talk or Upload Image');
+            }
+            msg?.serverContent?.modelTurn?.parts?.forEach((part) => {
+              if (part.inlineData?.data && typeof part.inlineData.data === 'string') {
+                enqueueAudio(base64ToArrayBuffer(part.inlineData.data));
+              }
+            });
+          },
+          onerror: (e) => {
+            console.error(e);
+            setStatus('Gemini WebSocket Error');
+          },
+          onclose: () => {
+            setStatus('Disconnected.');
+          },
+        },
+      });
+      sessionRef.current = session;
+      return true;
+    } catch (err) {
+      console.error(err);
+      setStatus('Failed to connect Gemini.');
+      return false;
     }
   };
 
-  const getStatusIcon = (status: Feeder['status']) => {
-    switch (status) {
-      case 'online': return <CheckCircle className="w-5 h-5" />;
-      case 'offline': return <AlertTriangle className="w-5 h-5" />;
-      case 'maintenance': return <Clock className="w-5 h-5" />;
-      case 'alarm': return <AlertTriangle className="w-5 h-5" />;
-      default: return <Power className="w-5 h-5" />;
+  // --- Audio Queue Playback ---
+  const enqueueAudio = (buffer: ArrayBuffer) => {
+    audioQueueRef.current.push(buffer);
+    if (!isPlayingAudioRef.current) playNextInQueue();
+  };
+
+  const playNextInQueue = async () => {
+    if (!audioQueueRef.current.length) {
+      isPlayingAudioRef.current = false;
+      if (!isRecording) setStatus('Ready to talk or Upload Image');
+      return;
+    }
+    isPlayingAudioRef.current = true;
+    const buffer = audioQueueRef.current.shift()!;
+    if (!audioContextRef.current) await initializeAudio();
+
+    try {
+      const int16 = new Int16Array(buffer);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+      const audioBuffer = audioContextRef.current!.createBuffer(1, float32.length, 24000);
+      audioBuffer.copyToChannel(float32, 0);
+      const source = audioContextRef.current!.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContextRef.current!.destination);
+      source.start();
+      source.onended = playNextInQueue;
+    } catch (err) {
+      console.error(err);
+      playNextInQueue();
     }
   };
 
-  const getLoadColor = (load: number): string => {
-    if (load >= 95) return 'bg-red-500';
-    if (load >= 80) return 'bg-yellow-500';
-    return 'bg-green-500';
+  // --- Periodic Image Sending ---
+  const startImageInterval = () => {
+    if (imageIntervalRef.current) clearInterval(imageIntervalRef.current);
+    imageIntervalRef.current = window.setInterval(() => {
+      if (sessionRef.current && currentImageBase64 && currentImageMimeType) {
+        const blob: GenAIBlob = { data: currentImageBase64, mimeType: currentImageMimeType };
+        sessionRef.current.sendRealtimeInput({ media: blob });
+      }
+    }, IMAGE_SEND_INTERVAL_MS);
   };
 
-  const getBandColor = (band: string): string => {
-    switch (band) {
-      case 'Band A': return 'bg-green-100 text-green-800 border-green-200';
-      case 'Band B': return 'bg-blue-100 text-blue-800 border-blue-200';
-      case 'Band C': return 'bg-purple-100 text-purple-800 border-purple-200';
-      default: return 'bg-gray-100 text-gray-800 border-gray-200';
+  const stopImageInterval = () => {
+    if (imageIntervalRef.current) clearInterval(imageIntervalRef.current);
+  };
+
+  // --- Recording ---
+  const toggleRecording = async () => {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      const ready = await initializeAudio();
+      if (!ready) return;
+      const connected = await connectToGemini();
+      if (!connected) return;
+      startRecording();
     }
   };
 
-  const totalCustomers = feeders.reduce((sum, feeder) => sum + feeder.customers, 0);
-  const onlineFeeders = feeders.filter(f => f.status === 'online').length;
-  const avgAvailability = feeders.reduce((sum, feeder) => sum + feeder.availability, 0) / feeders.length;
+  const startRecording = async () => {
+    setIsRecording(true);
+    setStatus('Listening...');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+      micStreamRef.current = stream;
+      const source = audioContextRef.current!.createMediaStreamSource(stream);
+      micNodeRef.current = source;
+      const worklet = new AudioWorkletNode(audioContextRef.current!, 'audio-processor', {
+        processorOptions: { targetSampleRate: TARGET_SAMPLE_RATE, bufferSize: WORKLET_BUFFER_SIZE },
+      });
+      worklet.port.onmessage = (e) => {
+        if (e.data.pcmData && sessionRef.current) {
+          const base64 = arrayBufferToBase64(e.data.pcmData as ArrayBuffer);
+          const blob: GenAIBlob = { data: base64, mimeType: `audio/pcm;rate=${TARGET_SAMPLE_RATE}` };
+          sessionRef.current.sendRealtimeInput({ media: blob });
+        }
+      };
+      source.connect(worklet);
+      workletNodeRef.current = worklet;
+      startImageInterval();
+    } catch (err) {
+      console.error(err);
+      setStatus('Mic error.');
+      setIsRecording(false);
+    }
+  };
+
+  const stopRecording = () => {
+    setIsRecording(false);
+    stopImageInterval();
+    micNodeRef.current?.disconnect();
+    workletNodeRef.current?.disconnect();
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    setStatus('Call ended.');
+    sessionRef.current?.close();
+    sessionRef.current = null;
+  };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      {/* Header */}
-      <div className="mb-8">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <Zap className="w-8 h-8 text-blue-600" />
-            <div>
-              <h1 className="text-3xl font-bold text-gray-900">Isolo UT - Ikeja Electric</h1>
-              <p className="text-gray-600">11kV Feeder Availability Dashboard</p>
+    <div className="min-h-screen flex flex-col items-center justify-center bg-gray-900 text-gray-200 p-4">
+      <h1 className="text-3xl font-semibold mb-6">Multimodal Live Chat</h1>
+
+      <div className="flex flex-col items-center bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md space-y-6">
+        <span className="text-gray-400">{status}</span>
+
+        <button
+          onClick={toggleRecording}
+          className={`flex flex-col items-center justify-center w-24 h-24 rounded-full ${
+            isRecording ? 'bg-red-600' : 'bg-blue-600'
+          }`}
+        >
+          <i className={`fas ${isRecording ? 'fa-stop' : 'fa-microphone'} text-3xl mb-2`}></i>
+          <span>{isRecording ? 'Stop' : 'Talk'}</span>
+        </button>
+
+        <div className="flex flex-col items-center w-full">
+          <label className="flex items-center px-4 py-2 bg-blue-600 rounded-md cursor-pointer hover:bg-blue-500">
+            <i className="fas fa-image mr-2"></i> Upload Image
+            <input type="file" accept="image/png, image/jpeg, image/webp" onChange={handleImageUpload} className="hidden" />
+          </label>
+          {imagePreview && (
+            <div className="relative mt-4 border-2 border-dashed border-gray-500 rounded p-1 w-full">
+              <img src={imagePreview} alt="preview" className="w-full object-contain max-h-48 rounded" />
+              <button
+                onClick={removeImage}
+                className="absolute -top-2 -right-2 bg-red-600 text-white rounded-full w-6 h-6 flex items-center justify-center"
+              >
+                ×
+              </button>
             </div>
-          </div>
-          <div className="text-right">
-            <p className="text-sm text-gray-500">Last Updated</p>
-            {currentTime ? (
-              <>
-                <p className="text-lg font-semibold">{currentTime.toLocaleTimeString()}</p>
-                <p className="text-sm text-gray-500">{currentTime.toLocaleDateString()}</p>
-              </>
-            ) : (
-              <>
-                <p className="text-lg font-semibold">Loading...</p>
-                <p className="text-sm text-gray-500">&nbsp;</p>
-              </>
-            )}
-          </div>
+          )}
         </div>
-      </div>
-
-      {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-        <div className="bg-white p-6 rounded-lg shadow-sm border">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-500">Isolo UT Feeders</p>
-              <p className="text-2xl font-bold text-gray-900">{feeders.length}</p>
-            </div>
-            <Power className="w-8 h-8 text-blue-500" />
-          </div>
-        </div>
-        
-        <div className="bg-white p-6 rounded-lg shadow-sm border">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-500">Online Feeders</p>
-              <p className="text-2xl font-bold text-green-600">{onlineFeeders}</p>
-            </div>
-            <CheckCircle className="w-8 h-8 text-green-500" />
-          </div>
-        </div>
-
-        <div className="bg-white p-6 rounded-lg shadow-sm border">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-500">Average Availability</p>
-              <p className="text-2xl font-bold text-blue-600">{avgAvailability.toFixed(1)}%</p>
-            </div>
-            <Activity className="w-8 h-8 text-blue-500" />
-          </div>
-        </div>
-
-        <div className="bg-white p-6 rounded-lg shadow-sm border">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-500">Total Customers</p>
-              <p className="text-2xl font-bold text-purple-600">{totalCustomers.toLocaleString()}</p>
-            </div>
-            <Power className="w-8 h-8 text-purple-500" />
-          </div>
-        </div>
-      </div>
-
-      {/* Feeders Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-        {feeders.map((feeder) => (
-          <div key={feeder.id} className="bg-white rounded-lg shadow-sm border overflow-hidden">
-            {/* Header */}
-            <div className="px-6 py-4 border-b bg-gray-50">
-              <div className="flex items-center justify-between mb-2">
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-900">{feeder.name}</h3>
-                  <p className="text-sm text-gray-500">{feeder.id}</p>
-                </div>
-                <div className={`px-3 py-1 rounded-full text-sm font-medium flex items-center space-x-1 ${getStatusColor(feeder.status)}`}>
-                  {getStatusIcon(feeder.status)}
-                  <span className="capitalize">{feeder.status}</span>
-                </div>
-              </div>
-              <div className="flex justify-start">
-                <span className={`px-2 py-1 rounded-md text-xs font-medium border ${getBandColor(feeder.band)}`}>
-                  {feeder.band}
-                </span>
-              </div>
-            </div>
-
-            {/* Metrics */}
-            <div className="p-6 space-y-4">
-              {/* Availability */}
-              <div>
-                <div className="flex justify-between items-center mb-2">
-                  <span className="text-sm font-medium text-gray-700">Availability</span>
-                  <span className="text-sm font-bold text-gray-900">{feeder.availability}%</span>
-                </div>
-                <div className="w-full bg-gray-200 rounded-full h-2">
-                  <div 
-                    className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
-                    style={{ width: `${feeder.availability}%` }}
-                  ></div>
-                </div>
-              </div>
-
-              {/* Load */}
-              <div>
-                <div className="flex justify-between items-center mb-2">
-                  <span className="text-sm font-medium text-gray-700">Load</span>
-                  <span className="text-sm font-bold text-gray-900">{feeder.load}%</span>
-                </div>
-                <div className="w-full bg-gray-200 rounded-full h-2">
-                  <div 
-                    className={`h-2 rounded-full transition-all duration-300 ${getLoadColor(feeder.load)}`}
-                    style={{ width: `${feeder.load}%` }}
-                  ></div>
-                </div>
-              </div>
-
-              {/* Electrical Parameters */}
-              <div className="grid grid-cols-2 gap-4 pt-2">
-                <div className="text-center">
-                  <p className="text-xs text-gray-500">Voltage (kV)</p>
-                  <p className="text-lg font-bold text-gray-900">
-                    {feeder.status === 'online' || feeder.status === 'alarm' ? feeder.voltage.toFixed(1) : '0.0'}
-                  </p>
-                </div>
-                <div className="text-center">
-                  <p className="text-xs text-gray-500">Current (A)</p>
-                  <p className="text-lg font-bold text-gray-900">
-                    {feeder.status === 'online' || feeder.status === 'alarm' ? Math.round(feeder.current) : '0'}
-                  </p>
-                </div>
-              </div>
-
-              {/* Additional Info */}
-              <div className="text-xs text-gray-500">
-                <p>Last Outage: {feeder.lastOutage}</p>
-                <p>Total Outages: {feeder.totalOutages}</p>
-                <p>Customers: {feeder.customers.toLocaleString()}</p>
-                <p>Location: {feeder.location}</p>
-              </div>
-            </div>
-          </div>
-        ))}
       </div>
     </div>
   );
-};
-
-export default ElectricityDashboard;
+}
