@@ -1,34 +1,44 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { GoogleGenAI, Modality, Session } from '@google/genai';
 import type { Blob as GenAIBlob } from '@google/genai';
 
-const API_KEY = 'AIzaSyCzUlQqOLxJWZfpSm8AFHOY_1P-mjatqUY'; // Put your key here
+const API_KEY = 'AIzaSyCzUlQqOLxJWZfpSm8AFHOY_1P-mjatqUY';
 const MODEL_NAME = 'gemini-2.0-flash-live-001';
 const TARGET_SAMPLE_RATE = 16000;
 const WORKLET_BUFFER_SIZE = 4096;
 const IMAGE_SEND_INTERVAL_MS = 5000;
 
+// Extend Window type for Safari support
+declare global {
+  interface Window {
+    webkitAudioContext?: typeof AudioContext;
+  }
+}
+
 // Helpers
 function arrayBufferToBase64(buffer: ArrayBuffer) {
   let binary = '';
   const bytes = new Uint8Array(buffer);
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
+  for (let i = 0; i < bytes.length; i++) {
     binary += String.fromCharCode(bytes[i]);
   }
   return window.btoa(binary);
 }
 
 function base64ToArrayBuffer(base64: string) {
-  const binaryString = window.atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
+  const binary = window.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
   }
   return bytes.buffer;
+}
+
+// Typed message from AudioWorklet
+interface AudioWorkletMessage {
+  pcmData: ArrayBuffer;
 }
 
 export default function LivePage() {
@@ -78,14 +88,15 @@ export default function LivePage() {
   };
 
   // --- Audio Helpers ---
-  const initializeAudio = async () => {
+  const initializeAudio = async (): Promise<boolean> => {
     if (!audioContextRef.current) {
       try {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
         if (audioContextRef.current.state === 'suspended') {
           await audioContextRef.current.resume();
         }
-        // Add AudioWorklet
+
+        // AudioWorklet code as a string
         const workletCode = `
           class AudioProcessor extends AudioWorkletProcessor {
             constructor(options) {
@@ -197,7 +208,7 @@ export default function LivePage() {
     }
   };
 
-  // --- Audio Queue Playback ---
+  // --- Audio Queue ---
   const enqueueAudio = (buffer: ArrayBuffer) => {
     audioQueueRef.current.push(buffer);
     if (!isPlayingAudioRef.current) playNextInQueue();
@@ -230,7 +241,7 @@ export default function LivePage() {
     }
   };
 
-  // --- Periodic Image Sending ---
+  // --- Image Interval ---
   const startImageInterval = () => {
     if (imageIntervalRef.current) clearInterval(imageIntervalRef.current);
     imageIntervalRef.current = window.setInterval(() => {
@@ -247,9 +258,8 @@ export default function LivePage() {
 
   // --- Recording ---
   const toggleRecording = async () => {
-    if (isRecording) {
-      stopRecording();
-    } else {
+    if (isRecording) stopRecording();
+    else {
       const ready = await initializeAudio();
       if (!ready) return;
       const connected = await connectToGemini();
@@ -266,16 +276,19 @@ export default function LivePage() {
       micStreamRef.current = stream;
       const source = audioContextRef.current!.createMediaStreamSource(stream);
       micNodeRef.current = source;
+
       const worklet = new AudioWorkletNode(audioContextRef.current!, 'audio-processor', {
         processorOptions: { targetSampleRate: TARGET_SAMPLE_RATE, bufferSize: WORKLET_BUFFER_SIZE },
       });
-      worklet.port.onmessage = (e) => {
+
+      worklet.port.onmessage = (e: MessageEvent<AudioWorkletMessage>) => {
         if (e.data.pcmData && sessionRef.current) {
-          const base64 = arrayBufferToBase64(e.data.pcmData as ArrayBuffer);
+          const base64 = arrayBufferToBase64(e.data.pcmData);
           const blob: GenAIBlob = { data: base64, mimeType: `audio/pcm;rate=${TARGET_SAMPLE_RATE}` };
           sessionRef.current.sendRealtimeInput({ media: blob });
         }
       };
+
       source.connect(worklet);
       workletNodeRef.current = worklet;
       startImageInterval();
@@ -319,6 +332,7 @@ export default function LivePage() {
             <i className="fas fa-image mr-2"></i> Upload Image
             <input type="file" accept="image/png, image/jpeg, image/webp" onChange={handleImageUpload} className="hidden" />
           </label>
+
           {imagePreview && (
             <div className="relative mt-4 border-2 border-dashed border-gray-500 rounded p-1 w-full">
               <img src={imagePreview} alt="preview" className="w-full object-contain max-h-48 rounded" />
