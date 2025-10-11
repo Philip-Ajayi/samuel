@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
+import Image from 'next/image';
 import { GoogleGenAI, Modality, Session } from '@google/genai';
 import type { Blob as GenAIBlob } from '@google/genai';
 
@@ -14,8 +15,7 @@ const IMAGE_SEND_INTERVAL_MS = 5000;
 function arrayBufferToBase64(buffer: ArrayBuffer) {
   let binary = '';
   const bytes = new Uint8Array(buffer);
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
+  for (let i = 0; i < bytes.length; i++) {
     binary += String.fromCharCode(bytes[i]);
   }
   return window.btoa(binary);
@@ -23,9 +23,8 @@ function arrayBufferToBase64(buffer: ArrayBuffer) {
 
 function base64ToArrayBuffer(base64: string) {
   const binaryString = window.atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
     bytes[i] = binaryString.charCodeAt(i);
   }
   return bytes.buffer;
@@ -85,10 +84,10 @@ export default function LivePage() {
         if (audioContextRef.current.state === 'suspended') {
           await audioContextRef.current.resume();
         }
-        // Add AudioWorklet
+
         const workletCode = `
           class AudioProcessor extends AudioWorkletProcessor {
-            constructor(options) {
+            constructor(options: { processorOptions: { targetSampleRate: number; bufferSize: number } }) {
               super();
               this.sampleRate = sampleRate;
               this.targetSampleRate = options.processorOptions.targetSampleRate || 16000;
@@ -101,7 +100,7 @@ export default function LivePage() {
               this.MAX_BUFFER_AGE_SECONDS = 0.5;
               this.resampleRatio = this.sampleRate / this.targetSampleRate;
             }
-            process(inputs) {
+            process(inputs: Float32Array[][]) {
               const input = inputs[0]?.[0];
               if (input?.length) {
                 const space = this._internalBuffer.length - this._internalBufferIndex;
@@ -317,11 +316,23 @@ export default function LivePage() {
         <div className="flex flex-col items-center w-full">
           <label className="flex items-center px-4 py-2 bg-blue-600 rounded-md cursor-pointer hover:bg-blue-500">
             <i className="fas fa-image mr-2"></i> Upload Image
-            <input type="file" accept="image/png, image/jpeg, image/webp" onChange={handleImageUpload} className="hidden" />
+            <input
+              type="file"
+              accept="image/png, image/jpeg, image/webp"
+              onChange={handleImageUpload}
+              className="hidden"
+            />
           </label>
           {imagePreview && (
             <div className="relative mt-4 border-2 border-dashed border-gray-500 rounded p-1 w-full">
-              <img src={imagePreview} alt="preview" className="w-full object-contain max-h-48 rounded" />
+              <Image
+                src={imagePreview}
+                alt="preview"
+                width={400}
+                height={300}
+                className="object-contain max-h-48 rounded"
+                unoptimized
+              />
               <button
                 onClick={removeImage}
                 className="absolute -top-2 -right-2 bg-red-600 text-white rounded-full w-6 h-6 flex items-center justify-center"
