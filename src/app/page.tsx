@@ -80,7 +80,11 @@ export default function LivePage() {
   const initializeAudio = async () => {
     if (!audioContextRef.current) {
       try {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const AudioContextClass: typeof AudioContext =
+          window.AudioContext ||
+          (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext!;
+
+        audioContextRef.current = new AudioContextClass();
         if (audioContextRef.current.state === 'suspended') {
           await audioContextRef.current.resume();
         }
@@ -147,6 +151,7 @@ export default function LivePage() {
         const url = URL.createObjectURL(blob);
         await audioContextRef.current.audioWorklet.addModule(url);
         URL.revokeObjectURL(url);
+
         return true;
       } catch (err) {
         setStatus('Audio initialization failed.');
@@ -154,6 +159,7 @@ export default function LivePage() {
         return false;
       }
     }
+
     if (audioContextRef.current.state === 'suspended') await audioContextRef.current.resume();
     return true;
   };
@@ -169,9 +175,7 @@ export default function LivePage() {
         callbacks: {
           onopen: () => setStatus('Connected to Gemini!'),
           onmessage: (msg) => {
-            if (msg?.setupComplete) {
-              setStatus('Ready to talk or Upload Image');
-            }
+            if (msg?.setupComplete) setStatus('Ready to talk or Upload Image');
             msg?.serverContent?.modelTurn?.parts?.forEach((part) => {
               if (part.inlineData?.data && typeof part.inlineData.data === 'string') {
                 enqueueAudio(base64ToArrayBuffer(part.inlineData.data));
@@ -182,9 +186,7 @@ export default function LivePage() {
             console.error(e);
             setStatus('Gemini WebSocket Error');
           },
-          onclose: () => {
-            setStatus('Disconnected.');
-          },
+          onclose: () => setStatus('Disconnected.'),
         },
       });
       sessionRef.current = session;
@@ -216,7 +218,7 @@ export default function LivePage() {
       const int16 = new Int16Array(buffer);
       const float32 = new Float32Array(int16.length);
       for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
-      const audioBuffer = audioContextRef.current!.createBuffer(1, float32.length, 24000);
+      const audioBuffer = audioContextRef.current!.createBuffer(1, float32.length, TARGET_SAMPLE_RATE);
       audioBuffer.copyToChannel(float32, 0);
       const source = audioContextRef.current!.createBufferSource();
       source.buffer = audioBuffer;
