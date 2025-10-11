@@ -77,8 +77,7 @@ export default function LivePage() {
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
         if (audioContextRef.current.state === 'suspended') await audioContextRef.current.resume();
 
-        // Disable ESLint for this block to avoid no-explicit-any errors
-        /* eslint-disable @typescript-eslint/no-explicit-any */
+        // @ts-expect-error AudioWorkletProcessor options cannot be fully typed
         const workletCode = `
           class AudioProcessor extends AudioWorkletProcessor {
             constructor(options) {
@@ -137,7 +136,6 @@ export default function LivePage() {
           }
           registerProcessor('audio-processor', AudioProcessor);
         `;
-        /* eslint-enable @typescript-eslint/no-explicit-any */
 
         const blob = new Blob([workletCode], { type: 'application/javascript' });
         const url = URL.createObjectURL(blob);
@@ -252,6 +250,7 @@ export default function LivePage() {
       micStreamRef.current = stream;
       const source = audioContextRef.current!.createMediaStreamSource(stream);
       micNodeRef.current = source;
+      // @ts-expect-error AudioWorkletNode options cannot be fully typed
       const worklet = new AudioWorkletNode(audioContextRef.current!, 'audio-processor', {
         processorOptions: { targetSampleRate: TARGET_SAMPLE_RATE, bufferSize: WORKLET_BUFFER_SIZE },
       });
