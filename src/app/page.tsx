@@ -1,7 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
-import Image from 'next/image';
+import { useEffect, useRef, useState } from 'react';
 import { GoogleGenAI, Modality, Session } from '@google/genai';
 import type { Blob as GenAIBlob } from '@google/genai';
 
@@ -15,7 +14,8 @@ const IMAGE_SEND_INTERVAL_MS = 5000;
 function arrayBufferToBase64(buffer: ArrayBuffer) {
   let binary = '';
   const bytes = new Uint8Array(buffer);
-  for (let i = 0; i < bytes.length; i++) {
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
     binary += String.fromCharCode(bytes[i]);
   }
   return window.btoa(binary);
@@ -23,8 +23,9 @@ function arrayBufferToBase64(buffer: ArrayBuffer) {
 
 function base64ToArrayBuffer(base64: string) {
   const binaryString = window.atob(base64);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
     bytes[i] = binaryString.charCodeAt(i);
   }
   return bytes.buffer;
@@ -80,18 +81,14 @@ export default function LivePage() {
   const initializeAudio = async () => {
     if (!audioContextRef.current) {
       try {
-        const AudioContextClass: typeof AudioContext =
-          window.AudioContext ||
-          (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext!;
-
-        audioContextRef.current = new AudioContextClass();
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
         if (audioContextRef.current.state === 'suspended') {
           await audioContextRef.current.resume();
         }
-
+        // Add AudioWorklet
         const workletCode = `
           class AudioProcessor extends AudioWorkletProcessor {
-            constructor(options: { processorOptions: { targetSampleRate: number; bufferSize: number } }) {
+            constructor(options) {
               super();
               this.sampleRate = sampleRate;
               this.targetSampleRate = options.processorOptions.targetSampleRate || 16000;
@@ -104,7 +101,7 @@ export default function LivePage() {
               this.MAX_BUFFER_AGE_SECONDS = 0.5;
               this.resampleRatio = this.sampleRate / this.targetSampleRate;
             }
-            process(inputs: Float32Array[][]) {
+            process(inputs) {
               const input = inputs[0]?.[0];
               if (input?.length) {
                 const space = this._internalBuffer.length - this._internalBufferIndex;
@@ -151,7 +148,6 @@ export default function LivePage() {
         const url = URL.createObjectURL(blob);
         await audioContextRef.current.audioWorklet.addModule(url);
         URL.revokeObjectURL(url);
-
         return true;
       } catch (err) {
         setStatus('Audio initialization failed.');
@@ -159,7 +155,6 @@ export default function LivePage() {
         return false;
       }
     }
-
     if (audioContextRef.current.state === 'suspended') await audioContextRef.current.resume();
     return true;
   };
@@ -175,7 +170,9 @@ export default function LivePage() {
         callbacks: {
           onopen: () => setStatus('Connected to Gemini!'),
           onmessage: (msg) => {
-            if (msg?.setupComplete) setStatus('Ready to talk or Upload Image');
+            if (msg?.setupComplete) {
+              setStatus('Ready to talk or Upload Image');
+            }
             msg?.serverContent?.modelTurn?.parts?.forEach((part) => {
               if (part.inlineData?.data && typeof part.inlineData.data === 'string') {
                 enqueueAudio(base64ToArrayBuffer(part.inlineData.data));
@@ -186,7 +183,9 @@ export default function LivePage() {
             console.error(e);
             setStatus('Gemini WebSocket Error');
           },
-          onclose: () => setStatus('Disconnected.'),
+          onclose: () => {
+            setStatus('Disconnected.');
+          },
         },
       });
       sessionRef.current = session;
@@ -218,7 +217,7 @@ export default function LivePage() {
       const int16 = new Int16Array(buffer);
       const float32 = new Float32Array(int16.length);
       for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
-      const audioBuffer = audioContextRef.current!.createBuffer(1, float32.length, TARGET_SAMPLE_RATE);
+      const audioBuffer = audioContextRef.current!.createBuffer(1, float32.length, 24000);
       audioBuffer.copyToChannel(float32, 0);
       const source = audioContextRef.current!.createBufferSource();
       source.buffer = audioBuffer;
@@ -318,23 +317,11 @@ export default function LivePage() {
         <div className="flex flex-col items-center w-full">
           <label className="flex items-center px-4 py-2 bg-blue-600 rounded-md cursor-pointer hover:bg-blue-500">
             <i className="fas fa-image mr-2"></i> Upload Image
-            <input
-              type="file"
-              accept="image/png, image/jpeg, image/webp"
-              onChange={handleImageUpload}
-              className="hidden"
-            />
+            <input type="file" accept="image/png, image/jpeg, image/webp" onChange={handleImageUpload} className="hidden" />
           </label>
           {imagePreview && (
             <div className="relative mt-4 border-2 border-dashed border-gray-500 rounded p-1 w-full">
-              <Image
-                src={imagePreview}
-                alt="preview"
-                width={400}
-                height={300}
-                className="object-contain max-h-48 rounded"
-                unoptimized
-              />
+              <img src={imagePreview} alt="preview" className="w-full object-contain max-h-48 rounded" />
               <button
                 onClick={removeImage}
                 className="absolute -top-2 -right-2 bg-red-600 text-white rounded-full w-6 h-6 flex items-center justify-center"
