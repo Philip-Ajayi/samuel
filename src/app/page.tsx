@@ -11,6 +11,24 @@ const IMAGE_SEND_INTERVAL_MS = 5000;
 
 const API_KEY = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
 
+// ✅ Extend window type to include webkitAudioContext
+declare global {
+  interface Window {
+    webkitAudioContext?: typeof AudioContext;
+  }
+}
+
+// ✅ Define a safer type for Gemini parts (replacing any)
+interface GeminiPart {
+  inlineData?: {
+    data?: string;
+    mimeType?: string;
+  };
+}
+
+// ==========================
+// === Helper Functions
+// ==========================
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   let binary = '';
   const bytes = new Uint8Array(buffer);
@@ -25,6 +43,9 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
+// ==========================
+// === Main Component
+// ==========================
 export default function Page() {
   const [status, setStatus] = useState('Click "Talk" or Upload an Image');
   const [isRecording, setIsRecording] = useState(false);
@@ -92,7 +113,8 @@ export default function Page() {
   async function initAudio() {
     if (!audioContext.current) {
       try {
-        audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        // ✅ Safe initialization without any
+        audioContext.current = new (window.AudioContext || window.webkitAudioContext!)();
         if (audioContext.current.state === 'suspended') await audioContext.current.resume();
 
         // Load audio worklet for real-time PCM downsampling
@@ -133,6 +155,9 @@ export default function Page() {
     return true;
   }
 
+  // ==========================
+  // === GEMINI CONNECTION
+  // ==========================
   async function connectToGemini() {
     if (!genAI.current) return false;
     setStatus('Connecting to Gemini...');
@@ -149,7 +174,7 @@ export default function Page() {
               if (isRecording) startRecording(); // auto-start if user clicked earlier
             }
             if (msg.serverContent?.modelTurn?.parts) {
-              msg.serverContent.modelTurn.parts.forEach((part: any) => {
+              msg.serverContent.modelTurn.parts.forEach((part: GeminiPart) => {
                 if (part.inlineData?.data) {
                   const buf = base64ToArrayBuffer(part.inlineData.data);
                   audioQueue.current.push(buf);
