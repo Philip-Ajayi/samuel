@@ -1,281 +1,276 @@
-'use client';
+"use client";
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { GoogleGenAI, Modality, Session } from '@google/genai';
-import type { Blob as GenAIBlob } from '@google/genai';
+import { useEffect, useRef, useState } from "react";
+import { GoogleGenAI, Modality, type Session, type Blob as GenAIBlob } from "@google/genai";
 
-const MODEL_NAME = 'gemini-2.0-flash-live-001';
+const MODEL_NAME = "gemini-2.0-flash-live-001";
 const TARGET_SAMPLE_RATE = 16000;
 const WORKLET_BUFFER_SIZE = 4096;
 const IMAGE_SEND_INTERVAL_MS = 5000;
 
-// Environment variable (set via .env.local)
-const API_KEY = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
+const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
+  let binary = "";
   const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
-}
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i]);
+  return window.btoa(binary);
+};
 
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binary = atob(base64);
-  const len = binary.length;
+const base64ToArrayBuffer = (base64: string) => {
+  const binaryString = window.atob(base64);
+  const len = binaryString.length;
   const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+  for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
   return bytes.buffer;
-}
+};
 
-export default function Page() {
-  const [status, setStatus] = useState<string>('Ready to talk or upload an image');
-  const [isRecording, setIsRecording] = useState<boolean>(false);
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [imageMime, setImageMime] = useState<string | null>(null);
+export default function HomePage() {
+  const API_KEY = process.env.NEXT_PUBLIC_GEMINI_API_KEY!;
+  const genAI = useRef<GoogleGenAI | null>(null);
+  const session = useRef<Session | null>(null);
 
-  const genAIRef = useRef<GoogleGenAI | null>(null);
-  const sessionRef = useRef<Session | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const audioQueueRef = useRef<ArrayBuffer[]>([]);
-  const isPlayingRef = useRef<boolean>(false);
-  const imageIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [status, setStatus] = useState("Ready to talk or Upload Image");
+  const [imageBase64, setImageBase64] = useState<string | null>(null);
+  const [imageMimeType, setImageMimeType] = useState<string | null>(null);
 
-  // --- Initialize Google GenAI instance ---
+  const audioContext = useRef<AudioContext | null>(null);
+  const audioWorkletNode = useRef<AudioWorkletNode | null>(null);
+  const micSourceNode = useRef<MediaStreamAudioSourceNode | null>(null);
+  const micStream = useRef<MediaStream | null>(null);
+  const imageInterval = useRef<number | null>(null);
+
+  const audioQueue = useRef<ArrayBuffer[]>([]);
+  const isPlayingAudio = useRef(false);
+  const isSetupComplete = useRef(false);
+
   useEffect(() => {
-    if (!API_KEY) {
-      setStatus('Missing API key. Please set NEXT_PUBLIC_GEMINI_API_KEY.');
-      return;
+    genAI.current = new GoogleGenAI({ apiKey: API_KEY, apiVersion: "v1alpha" });
+  }, [API_KEY]);
+
+  const updateStatus = (msg: string) => {
+    console.log("[Status]", msg);
+    setStatus(msg);
+  };
+
+  const cleanupAudioNodes = () => {
+    if (audioWorkletNode.current) {
+      audioWorkletNode.current.disconnect();
+      audioWorkletNode.current = null;
     }
-    genAIRef.current = new GoogleGenAI({ apiKey: API_KEY, apiVersion: 'v1alpha' });
-  }, []);
-
-  // --- Helper: Play queued audio chunks sequentially ---
-  const playNextAudio = useCallback(async () => {
-    const queue = audioQueueRef.current;
-    if (queue.length === 0) {
-      isPlayingRef.current = false;
-      return;
+    if (micSourceNode.current) {
+      micSourceNode.current.disconnect();
+      micSourceNode.current = null;
     }
-    isPlayingRef.current = true;
-    const chunk = queue.shift()!;
-    const ctx = audioContextRef.current ?? new AudioContext();
-    audioContextRef.current = ctx;
-
-    const int16Array = new Int16Array(chunk);
-    const float32 = new Float32Array(int16Array.length);
-    for (let i = 0; i < int16Array.length; i++) float32[i] = int16Array[i] / 32768;
-    const buf = ctx.createBuffer(1, float32.length, 24000);
-    buf.copyToChannel(float32, 0);
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    src.connect(ctx.destination);
-    src.start();
-    src.onended = () => playNextAudio();
-  }, []);
-
-  const enqueueAudio = useCallback(
-    (buf: ArrayBuffer) => {
-      audioQueueRef.current.push(buf);
-      if (!isPlayingRef.current) void playNextAudio();
-    },
-    [playNextAudio]
-  );
-
-  // --- Connect to Gemini session ---
-  const connectToGemini = useCallback(async (): Promise<boolean> => {
-    const genAI = genAIRef.current;
-    if (!genAI) {
-      setStatus('GenAI not initialized');
-      return false;
+    if (micStream.current) {
+      micStream.current.getTracks().forEach((t) => t.stop());
+      micStream.current = null;
     }
+  };
 
+  const initializeAudio = async () => {
+    if (!audioContext.current) {
+      audioContext.current = new AudioContext();
+      if (audioContext.current.state === "suspended") await audioContext.current.resume();
+      const workletCode = `
+        class AudioProcessor extends AudioWorkletProcessor {
+          constructor() {
+            super();
+            this.targetSR = 16000;
+            this.buffer = [];
+          }
+          process(inputs) {
+            const input = inputs[0][0];
+            if (input) {
+              const pcm = new Int16Array(input.length);
+              for (let i = 0; i < input.length; i++)
+                pcm[i] = Math.max(-1, Math.min(1, input[i])) * 32767;
+              this.port.postMessage({ pcmData: pcm.buffer }, [pcm.buffer]);
+            }
+            return true;
+          }
+        }
+        registerProcessor('audio-processor', AudioProcessor);
+      `;
+      const blob = new Blob([workletCode], { type: "application/javascript" });
+      const url = URL.createObjectURL(blob);
+      await audioContext.current.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  const connectToGemini = async () => {
+    if (!genAI.current) return;
+    updateStatus("Connecting to Gemini...");
     try {
-      sessionRef.current = await genAI.live.connect({
+      session.current = await genAI.current.live.connect({
         model: MODEL_NAME,
         config: { responseModalities: [Modality.AUDIO] },
         callbacks: {
-          onopen: () => setStatus('Connected to Gemini'),
-          onmessage: (event) => {
-            const msg = event;
-            if (msg?.setupComplete) setStatus('Setup complete. Listening...');
+          onopen: () => updateStatus("Connected!"),
+          onmessage: (msg) => {
+            if (msg?.setupComplete) {
+              updateStatus("Setup complete. Ready!");
+              isSetupComplete.current = true;
+            }
             if (msg?.serverContent?.modelTurn?.parts) {
-              msg.serverContent.modelTurn.parts.forEach((part) => {
-                if (part.inlineData?.data) {
-                  enqueueAudio(base64ToArrayBuffer(part.inlineData.data));
+              msg.serverContent.modelTurn.parts.forEach((p) => {
+                if (p.inlineData?.data) {
+                  const buf = base64ToArrayBuffer(p.inlineData.data);
+                  enqueueAudio(buf);
                 }
               });
             }
           },
-          onerror: (e: ErrorEvent) => {
-            console.error('WebSocket error', e);
-            setStatus(`Error: ${e.message}`);
-          },
-          onclose: () => {
-            setStatus('Disconnected');
-            stopRecording();
-          },
+          onclose: () => updateStatus("Disconnected."),
+          onerror: (err) => updateStatus(`Error: ${err.message}`),
         },
       });
-      return true;
-    } catch (err) {
-      console.error('connectToGemini error', err);
-      setStatus('Connection failed');
-      return false;
+    } catch (e) {
+      console.error(e);
+      updateStatus("Connection failed.");
     }
-  }, [enqueueAudio]);
+  };
 
-  // --- Initialize Audio System ---
-  const initAudioSystem = useCallback(async (): Promise<AudioContext | null> => {
-    try {
-      const ctx = new AudioContext();
-      const blob = new Blob(
-        [
-          `
-          class AudioProcessor extends AudioWorkletProcessor {
-            constructor() { super(); this.buffer = []; }
-            process(inputs) {
-              const input = inputs[0][0];
-              if (input) {
-                const pcm = new Int16Array(input.length);
-                for (let i=0;i<input.length;i++) pcm[i] = Math.max(-1, Math.min(1, input[i])) * 32767;
-                this.port.postMessage({ pcmData: pcm.buffer }, [pcm.buffer]);
-              }
-              return true;
-            }
-          }
-          registerProcessor('audio-processor', AudioProcessor);
-        `,
-        ],
-        { type: 'application/javascript' }
-      );
-      const url = URL.createObjectURL(blob);
-      await ctx.audioWorklet.addModule(url);
-      URL.revokeObjectURL(url);
-      audioContextRef.current = ctx;
-      return ctx;
-    } catch (err) {
-      console.error('initAudioSystem failed', err);
-      setStatus('Audio init failed');
-      return null;
-    }
-  }, []);
+  const enqueueAudio = (buf: ArrayBuffer) => {
+    audioQueue.current.push(buf);
+    if (!isPlayingAudio.current) playNext();
+  };
 
-  // --- Start Recording ---
-  const startRecording = useCallback(async () => {
-    setStatus('Starting...');
-    const ctx = (await initAudioSystem()) ?? audioContextRef.current;
-    if (!ctx) return;
-    await connectToGemini();
-
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const src = ctx.createMediaStreamSource(stream);
-    const node = new AudioWorkletNode(ctx, 'audio-processor');
-    node.port.onmessage = (ev: MessageEvent<{ pcmData: ArrayBuffer }>) => {
-      const pcm = ev.data.pcmData;
-      const session = sessionRef.current;
-      if (session && pcm) {
-        const base64 = arrayBufferToBase64(pcm);
-        const blob: GenAIBlob = { data: base64, mimeType: `audio/pcm;rate=${TARGET_SAMPLE_RATE}` };
-        session.sendRealtimeInput({ media: blob });
-      }
-    };
-    src.connect(node);
-    setStatus('Listening...');
-    setIsRecording(true);
-  }, [connectToGemini, initAudioSystem]);
-
-  // --- Stop Recording ---
-  const stopRecording = useCallback(() => {
-    setIsRecording(false);
-    if (imageIntervalRef.current) clearInterval(imageIntervalRef.current);
-    sessionRef.current?.close();
-    setStatus('Call ended');
-  }, []);
-
-  // --- Handle Image Upload ---
-  const handleImageUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const mime = file.type;
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(mime)) {
-      setStatus('Unsupported image type');
+  const playNext = async () => {
+    if (!audioQueue.current.length) {
+      isPlayingAudio.current = false;
       return;
     }
+    isPlayingAudio.current = true;
+    const buffer = audioQueue.current.shift()!;
+    const ctx = audioContext.current!;
+    const PLAYBACK_SR = 24000;
+    const int16 = new Int16Array(buffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+    const audioBuffer = ctx.createBuffer(1, float32.length, PLAYBACK_SR);
+    audioBuffer.copyToChannel(float32, 0);
+    const src = ctx.createBufferSource();
+    src.buffer = audioBuffer;
+    src.connect(ctx.destination);
+    src.start();
+    src.onended = playNext;
+  };
+
+  const startRecording = async () => {
+    await initializeAudio();
+    await connectToGemini();
+
+    updateStatus("Requesting mic...");
+    micStream.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = audioContext.current!;
+    micSourceNode.current = ctx.createMediaStreamSource(micStream.current);
+    audioWorkletNode.current = new AudioWorkletNode(ctx, "audio-processor");
+    audioWorkletNode.current.port.onmessage = (e) => {
+      if (e.data.pcmData && session.current) {
+        const base64 = arrayBufferToBase64(e.data.pcmData);
+        const blob: GenAIBlob = { data: base64, mimeType: `audio/pcm;rate=${TARGET_SAMPLE_RATE}` };
+        session.current.sendRealtimeInput({ media: blob });
+      }
+    };
+    micSourceNode.current.connect(audioWorkletNode.current);
+    updateStatus("Listening...");
+    startImageInterval();
+  };
+
+  const stopRecording = () => {
+    cleanupAudioNodes();
+    stopImageInterval();
+    setIsRecording(false);
+    updateStatus("Call ended.");
+    session.current?.close();
+  };
+
+  const handleToggle = async () => {
+    if (isRecording) stopRecording();
+    else {
+      setIsRecording(true);
+      await startRecording();
+    }
+  };
+
+  const startImageInterval = () => {
+    stopImageInterval();
+    if (!imageBase64 || !session.current) return;
+    imageInterval.current = window.setInterval(() => {
+      sendImage();
+    }, IMAGE_SEND_INTERVAL_MS);
+    sendImage(); // send immediately
+  };
+
+  const stopImageInterval = () => {
+    if (imageInterval.current) clearInterval(imageInterval.current);
+    imageInterval.current = null;
+  };
+
+  const sendImage = () => {
+    if (!session.current || !imageBase64 || !imageMimeType) return;
+    const blob: GenAIBlob = { data: imageBase64, mimeType: imageMimeType };
+    session.current.sendRealtimeInput({ media: blob });
+  };
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
-      const base64 = (reader.result as string).split(',')[1];
-      setImagePreview(reader.result as string);
-      setImageMime(mime);
-      setStatus('Image loaded');
-      const sendImage = () => {
-        const session = sessionRef.current;
-        if (session && base64 && isRecording) {
-          const blob: GenAIBlob = { data: base64, mimeType: mime };
-          session.sendRealtimeInput({ media: blob });
-          console.log('Sent image to Gemini');
-        }
-      };
-      sendImage();
-      imageIntervalRef.current = setInterval(sendImage, IMAGE_SEND_INTERVAL_MS);
+      const result = reader.result as string;
+      setImageBase64(result.split(",")[1]);
+      setImageMimeType(file.type);
     };
     reader.readAsDataURL(file);
-  }, [isRecording]);
-
-  const removeImage = useCallback(() => {
-    setImagePreview(null);
-    setImageMime(null);
-    if (imageIntervalRef.current) clearInterval(imageIntervalRef.current);
-    setStatus('Image removed');
-  }, []);
+  };
 
   return (
-    <main className="min-h-screen flex flex-col items-center justify-center bg-gray-950 text-gray-100 p-6">
-      <h1 className="text-3xl font-semibold mb-8 text-center text-blue-400">
-        Multimodal Live Chat – YeyuLab
-      </h1>
+    <main className="flex flex-col items-center justify-center min-h-screen p-6 text-center">
+      <h1 className="text-3xl font-semibold mb-8">🎙️ Multimodal Live Chat – YeyuLab</h1>
 
-      <div className="flex flex-col items-center bg-gray-900 p-8 rounded-2xl shadow-xl w-full max-w-md">
-        <span className="mb-4 text-gray-400 text-sm">{status}</span>
+      <div className="bg-neutral-900 p-6 rounded-2xl shadow-lg flex flex-col items-center gap-6 w-full max-w-md">
+        <span className="text-gray-400">{status}</span>
 
-        {/* Record Button */}
         <button
-          onClick={isRecording ? stopRecording : startRecording}
-          className={`relative flex flex-col items-center justify-center w-24 h-24 rounded-full transition-colors ${
-            isRecording ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-500 hover:bg-blue-600'
-          }`}
+          onClick={handleToggle}
+          className={`relative w-28 h-28 rounded-full flex flex-col items-center justify-center transition-colors ${
+            isRecording ? "bg-red-500 hover:bg-red-600" : "bg-blue-500 hover:bg-blue-600"
+          } text-white`}
         >
-          <i
-            className={`fa-solid ${isRecording ? 'fa-stop' : 'fa-microphone'} text-3xl mb-1`}
-          ></i>
-          <span className="text-sm">{isRecording ? 'Stop' : 'Talk'}</span>
-          {isRecording && (
-            <svg className="absolute inset-0 w-full h-full animate-ping text-red-400 opacity-50">
-              <circle cx="50%" cy="50%" r="40%" stroke="currentColor" strokeWidth="2" fill="none" />
-            </svg>
-          )}
+          <i className={`fas ${isRecording ? "fa-stop" : "fa-microphone"} text-3xl mb-2`} />
+          <span>{isRecording ? "Stop" : "Talk"}</span>
         </button>
 
-        {/* Image Upload */}
-        <div className="mt-6 flex flex-col items-center gap-3 w-full">
+        <div className="bg-neutral-800 rounded-xl p-4 w-full max-w-xs flex flex-col items-center border border-neutral-700">
           <label
             htmlFor="imageUpload"
-            className="flex items-center px-4 py-2 bg-blue-500 hover:bg-blue-600 rounded-md cursor-pointer text-white text-sm"
+            className="flex items-center gap-2 px-4 py-2 bg-blue-500 text-white rounded-md cursor-pointer hover:bg-blue-600 text-sm"
           >
-            <i className="fa-solid fa-image mr-2"></i> Upload Image
+            <i className="fas fa-image"></i> Upload Image
           </label>
           <input
             id="imageUpload"
             type="file"
-            accept="image/png, image/jpeg, image/webp"
+            accept="image/png,image/jpeg,image/webp"
             onChange={handleImageUpload}
             className="hidden"
           />
-          {imagePreview && (
-            <div className="relative border border-gray-700 rounded-md overflow-hidden">
-              <img src={imagePreview} alt="Preview" className="max-h-48 object-contain" />
+          {imageBase64 && (
+            <div className="relative mt-4">
+              <img
+                src={`data:${imageMimeType};base64,${imageBase64}`}
+                alt="Preview"
+                className="max-h-40 rounded-md border border-neutral-700"
+              />
               <button
-                onClick={removeImage}
-                className="absolute top-1 right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5"
+                onClick={() => {
+                  setImageBase64(null);
+                  setImageMimeType(null);
+                }}
+                className="absolute -top-2 -right-2 bg-red-500 text-white w-6 h-6 rounded-full"
               >
                 ×
               </button>
