@@ -11,8 +11,7 @@ const IMAGE_SEND_INTERVAL_MS = 5000;
 const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
   let binary = "";
   const bytes = new Uint8Array(buffer);
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i]);
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
   return window.btoa(binary);
 };
 
@@ -72,13 +71,9 @@ export default function HomePage() {
     if (!audioContext.current) {
       audioContext.current = new AudioContext();
       if (audioContext.current.state === "suspended") await audioContext.current.resume();
+
       const workletCode = `
         class AudioProcessor extends AudioWorkletProcessor {
-          constructor() {
-            super();
-            this.targetSR = 16000;
-            this.buffer = [];
-          }
           process(inputs) {
             const input = inputs[0][0];
             if (input) {
@@ -105,7 +100,10 @@ export default function HomePage() {
     try {
       session.current = await genAI.current.live.connect({
         model: MODEL_NAME,
-        config: { responseModalities: [Modality.AUDIO] },
+        config: {
+          responseModalities: [Modality.AUDIO],
+          audioConfig: { sampleRateHertz: 24000 }, // ✅ ensure playback-compatible PCM
+        },
         callbacks: {
           onopen: () => updateStatus("Connected!"),
           onmessage: (msg) => {
@@ -116,8 +114,7 @@ export default function HomePage() {
             if (msg?.serverContent?.modelTurn?.parts) {
               msg.serverContent.modelTurn.parts.forEach((p) => {
                 if (p.inlineData?.data) {
-                  const buf = base64ToArrayBuffer(p.inlineData.data);
-                  enqueueAudio(buf);
+                  enqueueAudio(base64ToArrayBuffer(p.inlineData.data));
                 }
               });
             }
@@ -132,48 +129,68 @@ export default function HomePage() {
     }
   };
 
+  // 🟦 Audio queue & playback
   const enqueueAudio = (buf: ArrayBuffer) => {
     audioQueue.current.push(buf);
-    if (!isPlayingAudio.current) playNext();
+    if (!isPlayingAudio.current) {
+      isPlayingAudio.current = true;
+      playNext();
+    }
   };
 
   const playNext = async () => {
-    if (!audioQueue.current.length) {
+    if (!audioQueue.current.length || !audioContext.current) {
       isPlayingAudio.current = false;
       return;
     }
-    isPlayingAudio.current = true;
+    const ctx = audioContext.current;
+    if (ctx.state === "suspended") await ctx.resume();
+
     const buffer = audioQueue.current.shift()!;
-    const ctx = audioContext.current!;
-    const PLAYBACK_SR = 24000;
     const int16 = new Int16Array(buffer);
     const float32 = new Float32Array(int16.length);
     for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+
+    const PLAYBACK_SR = 24000;
     const audioBuffer = ctx.createBuffer(1, float32.length, PLAYBACK_SR);
     audioBuffer.copyToChannel(float32, 0);
+
     const src = ctx.createBufferSource();
     src.buffer = audioBuffer;
-    src.connect(ctx.destination);
+
+    const gain = ctx.createGain();
+    gain.gain.value = 1.0;
+
+    src.connect(gain).connect(ctx.destination);
     src.start();
-    src.onended = playNext;
+
+    src.onended = () => {
+      if (audioQueue.current.length) playNext();
+      else isPlayingAudio.current = false;
+    };
   };
 
   const startRecording = async () => {
     await initializeAudio();
     await connectToGemini();
 
-    updateStatus("Requesting mic...");
+    updateStatus("Requesting microphone...");
     micStream.current = await navigator.mediaDevices.getUserMedia({ audio: true });
     const ctx = audioContext.current!;
     micSourceNode.current = ctx.createMediaStreamSource(micStream.current);
+
     audioWorkletNode.current = new AudioWorkletNode(ctx, "audio-processor");
     audioWorkletNode.current.port.onmessage = (e) => {
       if (e.data.pcmData && session.current) {
         const base64 = arrayBufferToBase64(e.data.pcmData);
-        const blob: GenAIBlob = { data: base64, mimeType: `audio/pcm;rate=${TARGET_SAMPLE_RATE}` };
+        const blob: GenAIBlob = {
+          data: base64,
+          mimeType: `audio/pcm;rate=${TARGET_SAMPLE_RATE}`,
+        };
         session.current.sendRealtimeInput({ media: blob });
       }
     };
+
     micSourceNode.current.connect(audioWorkletNode.current);
     updateStatus("Listening...");
     startImageInterval();
@@ -201,7 +218,7 @@ export default function HomePage() {
     imageInterval.current = window.setInterval(() => {
       sendImage();
     }, IMAGE_SEND_INTERVAL_MS);
-    sendImage(); // send immediately
+    sendImage(); // send once immediately
   };
 
   const stopImageInterval = () => {
@@ -229,7 +246,7 @@ export default function HomePage() {
 
   return (
     <main className="flex flex-col items-center justify-center min-h-screen p-6 text-center">
-      <h1 className="text-3xl font-semibold mb-8">🎙️ Multimodal Live Chat – YeyuLab</h1>
+      <h1 className="text-3xl font-semibold mb-8">🎙️ Multimodal Live Chat – Fixed</h1>
 
       <div className="bg-neutral-900 p-6 rounded-2xl shadow-lg flex flex-col items-center gap-6 w-full max-w-md">
         <span className="text-gray-400">{status}</span>
