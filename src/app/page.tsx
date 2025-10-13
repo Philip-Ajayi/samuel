@@ -15,6 +15,7 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
   return window.btoa(binary);
 }
+
 function base64ToArrayBuffer(base64: string): ArrayBuffer {
   const binaryString = window.atob(base64);
   const len = binaryString.length;
@@ -117,9 +118,11 @@ export default function Page() {
         this.imageSendIntervalId = window.setInterval(() => this.sendPeriodicImageData(), IMAGE_SEND_INTERVAL_MS);
         if (this.currentImageBase64 && this.currentImageMimeType) this.sendPeriodicImageData();
       }
+
       private stopPeriodicImageSending() {
         if (this.imageSendIntervalId) clearInterval(this.imageSendIntervalId);
       }
+
       private sendPeriodicImageData() {
         if (!this.session || !this.isRecording || !this.currentImageBase64) return;
         const blob: GenAIBlob = { data: this.currentImageBase64!, mimeType: this.currentImageMimeType! };
@@ -128,7 +131,10 @@ export default function Page() {
 
       private async initializeAudioSystem() {
         if (!this.audioContext) {
-          this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+          this.audioContext = new (
+            window.AudioContext ||
+            (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+          )();
           if (this.audioContext.state === "suspended") await this.audioContext.resume();
           const workletCode = `
             class AudioProcessor extends AudioWorkletProcessor {
@@ -341,7 +347,10 @@ export default function Page() {
               <span>Upload Image</span>
             </label>
             <input id="imageUpload" type="file" accept="image/png,image/jpeg,image/webp" className="hidden" />
-            <div id="imagePreviewContainer" className="hidden relative border-2 border-dashed border-white/20 p-2 rounded w-full">
+            <div
+              id="imagePreviewContainer"
+              className="hidden relative border-2 border-dashed border-white/20 p-2 rounded w-full"
+            >
               <img id="imagePreview" src="#" alt="Preview" className="max-h-52 mx-auto rounded object-contain" />
               <button
                 id="removeImageButton"
