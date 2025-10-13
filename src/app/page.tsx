@@ -27,7 +27,7 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-export default function Page(): JSX.Element {
+export default function Page() {
   const [status, setStatus] = useState<string>('Ready to talk or upload an image');
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
