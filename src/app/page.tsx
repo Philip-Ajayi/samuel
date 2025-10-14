@@ -43,8 +43,6 @@ export default function Page() {
       private imagePreviewContainer: HTMLDivElement;
       private imagePreview: HTMLImageElement;
       private removeImageButton: HTMLButtonElement;
-      private currentImageBase64: string | null = null;
-      private currentImageMimeType: string | null = null;
       private session: Session | null = null;
       private isRecording = false;
       private audioContext: AudioContext | null = null;
@@ -55,6 +53,8 @@ export default function Page() {
       private isPlayingAudio = false;
       private isSetupComplete = false;
       private imageSendIntervalId: number | null = null;
+      private currentImageBase64: string | null = null;
+      private currentImageMimeType: string | null = null;
 
       constructor() {
         this.genAI = new GoogleGenAI({ apiKey: API_KEY!, apiVersion: "v1alpha" });
@@ -79,6 +79,15 @@ export default function Page() {
         this.recordingStatus.textContent = msg;
         this.recordingStatus.style.color = err ? "#ff453a" : "#A8A8A8";
         if (err) console.error(msg);
+      }
+
+      private addTranscription(text: string) {
+        const container = document.getElementById("transcriptionContainer");
+        if (!container) return;
+        const p = document.createElement("p");
+        p.textContent = text;
+        container.appendChild(p);
+        container.scrollTop = container.scrollHeight; // auto-scroll
       }
 
       private async handleImageUpload(e: Event) {
@@ -175,11 +184,20 @@ export default function Page() {
                   this.updateStatus("Ready to talk or Upload Image");
                   if (this.isRecording) this.startRecording();
                 }
+
+                // --- Audio playback ---
                 if (msg?.serverContent?.modelTurn?.parts)
                   msg.serverContent.modelTurn.parts.forEach((p) => {
                     if (p.inlineData?.data)
                       this.enqueueAudio(base64ToArrayBuffer(p.inlineData.data as string));
                   });
+
+                // --- Transcription ---
+                if (msg?.serverContent?.outputTranscription?.text) {
+                  const transcript = msg.serverContent.outputTranscription.text;
+                  console.log("Transcription:", transcript);
+                  this.addTranscription(transcript);
+                }
               },
               onerror: (e) => {
                 console.error("WebSocket error", e);
@@ -321,18 +339,14 @@ export default function Page() {
         <h1 className="text-3xl font-semibold">Multimodal Live Chat - YeyuLab</h1>
 
         <div className="p-6 bg-[#1E1E1E] rounded-2xl shadow-lg flex flex-col items-center">
-          <span id="recordingStatus" className="text-[#A8A8A8] mb-4">
-            Ready
-          </span>
+          <span id="recordingStatus" className="text-[#A8A8A8] mb-4">Ready</span>
 
           <button
             id="recordButton"
             className="w-24 h-24 rounded-full bg-[#82aaff] flex flex-col justify-center items-center text-white transition-colors hover:bg-[#6c8edf] relative"
           >
             <i id="micIcon" className="fas fa-microphone text-3xl mb-1" />
-            <span id="recordText" className="text-sm font-medium">
-              Talk
-            </span>
+            <span id="recordText" className="text-sm font-medium">Talk</span>
             <svg className="record-waves absolute w-40 h-40 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none hidden">
               <circle className="wave wave1" cx="50" cy="50" r="20" />
             </svg>
@@ -361,6 +375,12 @@ export default function Page() {
               </button>
             </div>
           </div>
+
+          {/* --- Transcription container --- */}
+          <div
+            id="transcriptionContainer"
+            className="mt-4 p-3 bg-[#2a2a2a] rounded-lg w-80 max-h-60 overflow-y-auto text-sm text-[#E1E1E1] space-y-1"
+          ></div>
         </div>
       </div>
     </div>
