@@ -43,6 +43,8 @@ export default function Page() {
       private imagePreviewContainer: HTMLDivElement;
       private imagePreview: HTMLImageElement;
       private removeImageButton: HTMLButtonElement;
+      private currentImageBase64: string | null = null;
+      private currentImageMimeType: string | null = null;
       private session: Session | null = null;
       private isRecording = false;
       private audioContext: AudioContext | null = null;
@@ -53,8 +55,6 @@ export default function Page() {
       private isPlayingAudio = false;
       private isSetupComplete = false;
       private imageSendIntervalId: number | null = null;
-      private currentImageBase64: string | null = null;
-      private currentImageMimeType: string | null = null;
 
       constructor() {
         this.genAI = new GoogleGenAI({ apiKey: API_KEY!, apiVersion: "v1alpha" });
@@ -81,13 +81,11 @@ export default function Page() {
         if (err) console.error(msg);
       }
 
-      private addTranscription(text: string) {
-        const container = document.getElementById("transcriptionContainer");
-        if (!container) return;
-        const p = document.createElement("p");
-        p.textContent = text;
-        container.appendChild(p);
-        container.scrollTop = container.scrollHeight; // auto-scroll
+      // --- ✅ NEW: show transcription live ---
+      private showTranscription(text: string) {
+        let transcriptEl = document.getElementById("transcription");
+        if (!transcriptEl) return;
+        transcriptEl.textContent = text;
       }
 
       private async handleImageUpload(e: Event) {
@@ -175,28 +173,30 @@ export default function Page() {
           if (this.session) this.session.close();
           this.session = await this.genAI.live.connect({
             model: MODEL_NAME,
-            config: { responseModalities: [Modality.AUDIO] },
+            config: {
+              responseModalities: [Modality.AUDIO],
+              outputAudioTranscription: {}, // ✅ Enable live transcription
+            },
             callbacks: {
               onopen: () => this.updateStatus("Connected to Gemini! Finalizing setup..."),
               onmessage: (msg) => {
+                // --- existing setup handling ---
                 if (msg?.setupComplete) {
                   this.isSetupComplete = true;
                   this.updateStatus("Ready to talk or Upload Image");
                   if (this.isRecording) this.startRecording();
                 }
 
-                // --- Audio playback ---
+                // --- existing audio handling ---
                 if (msg?.serverContent?.modelTurn?.parts)
                   msg.serverContent.modelTurn.parts.forEach((p) => {
                     if (p.inlineData?.data)
                       this.enqueueAudio(base64ToArrayBuffer(p.inlineData.data as string));
                   });
 
-                // --- Transcription ---
+                // --- ✅ NEW: handle transcription messages ---
                 if (msg?.serverContent?.outputTranscription?.text) {
-                  const transcript = msg.serverContent.outputTranscription.text;
-                  console.log("Transcription:", transcript);
-                  this.addTranscription(transcript);
+                  this.showTranscription(msg.serverContent.outputTranscription.text);
                 }
               },
               onerror: (e) => {
@@ -339,18 +339,25 @@ export default function Page() {
         <h1 className="text-3xl font-semibold">Multimodal Live Chat - YeyuLab</h1>
 
         <div className="p-6 bg-[#1E1E1E] rounded-2xl shadow-lg flex flex-col items-center">
-          <span id="recordingStatus" className="text-[#A8A8A8] mb-4">Ready</span>
+          <span id="recordingStatus" className="text-[#A8A8A8] mb-4">
+            Ready
+          </span>
 
           <button
             id="recordButton"
             className="w-24 h-24 rounded-full bg-[#82aaff] flex flex-col justify-center items-center text-white transition-colors hover:bg-[#6c8edf] relative"
           >
             <i id="micIcon" className="fas fa-microphone text-3xl mb-1" />
-            <span id="recordText" className="text-sm font-medium">Talk</span>
+            <span id="recordText" className="text-sm font-medium">
+              Talk
+            </span>
             <svg className="record-waves absolute w-40 h-40 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none hidden">
               <circle className="wave wave1" cx="50" cy="50" r="20" />
             </svg>
           </button>
+
+          {/* ✅ Transcription display */}
+          <div id="transcription" className="mt-4 text-sm text-gray-400 max-w-xs text-center"></div>
 
           <div className="mt-6 flex flex-col items-center bg-[#2a2a2a] rounded-lg p-4 w-80 border border-white/10 space-y-3">
             <label
@@ -375,12 +382,6 @@ export default function Page() {
               </button>
             </div>
           </div>
-
-          {/* --- Transcription container --- */}
-          <div
-            id="transcriptionContainer"
-            className="mt-4 p-3 bg-[#2a2a2a] rounded-lg w-80 max-h-60 overflow-y-auto text-sm text-[#E1E1E1] space-y-1"
-          ></div>
         </div>
       </div>
     </div>
