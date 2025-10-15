@@ -38,7 +38,7 @@ export default function Page() {
       private micIcon: HTMLElement;
       private recordText: HTMLElement;
       private recordingStatus: HTMLSpanElement;
-      private recordWavesSVG: SVGSVGElement;
+      private recordWavesSVG: SVGSVGElement | null;
       private imageUploadInput: HTMLInputElement;
       private imagePreviewContainer: HTMLDivElement;
       private imagePreview: HTMLImageElement;
@@ -63,7 +63,7 @@ export default function Page() {
         this.micIcon = document.getElementById("micIcon")!;
         this.recordText = document.getElementById("recordText")!;
         this.recordingStatus = document.getElementById("recordingStatus") as HTMLSpanElement;
-        this.recordWavesSVG = document.querySelector(".record-waves") as SVGSVGElement;
+        this.recordWavesSVG = document.querySelector(".record-waves") as SVGSVGElement | null;
         this.imageUploadInput = document.getElementById("imageUpload") as HTMLInputElement;
         this.imagePreviewContainer = document.getElementById("imagePreviewContainer") as HTMLDivElement;
         this.imagePreview = document.getElementById("imagePreview") as HTMLImageElement;
@@ -81,9 +81,9 @@ export default function Page() {
         if (err) console.error(msg);
       }
 
-      // --- ✅ NEW: show transcription live ---
+      // --- ✅ Show transcription live ---
       private showTranscription(text: string) {
-        let transcriptEl = document.getElementById("transcription");
+        const transcriptEl = document.getElementById("transcription");
         if (!transcriptEl) return;
         transcriptEl.textContent = text;
       }
@@ -163,7 +163,6 @@ export default function Page() {
 
       private async connectToGeminiIfNeeded() {
         if (this.session && this.isSetupComplete) return true;
-        if (this.session && !this.isSetupComplete) return true;
         return this.connectToGemini();
       }
 
@@ -180,21 +179,18 @@ export default function Page() {
             callbacks: {
               onopen: () => this.updateStatus("Connected to Gemini! Finalizing setup..."),
               onmessage: (msg) => {
-                // --- existing setup handling ---
                 if (msg?.setupComplete) {
                   this.isSetupComplete = true;
                   this.updateStatus("Ready to talk or Upload Image");
                   if (this.isRecording) this.startRecording();
                 }
 
-                // --- existing audio handling ---
                 if (msg?.serverContent?.modelTurn?.parts)
                   msg.serverContent.modelTurn.parts.forEach((p) => {
                     if (p.inlineData?.data)
                       this.enqueueAudio(base64ToArrayBuffer(p.inlineData.data as string));
                   });
 
-                // --- ✅ NEW: handle transcription messages ---
                 if (msg?.serverContent?.outputTranscription?.text) {
                   this.showTranscription(msg.serverContent.outputTranscription.text);
                 }
