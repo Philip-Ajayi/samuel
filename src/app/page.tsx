@@ -56,6 +56,10 @@ export default function Page() {
       private isSetupComplete = false;
       private imageSendIntervalId: number | null = null;
 
+      // --- New properties for text input ---
+      private textInput: HTMLInputElement;
+      private sendTextButton: HTMLButtonElement;
+
       constructor() {
         this.genAI = new GoogleGenAI({ apiKey: API_KEY!, apiVersion: "v1alpha" });
 
@@ -72,6 +76,19 @@ export default function Page() {
         this.recordButton.addEventListener("click", () => this.toggleRecording());
         this.imageUploadInput.addEventListener("change", (e) => this.handleImageUpload(e));
         this.removeImageButton.addEventListener("click", () => this.removeImage());
+
+        // --- Wire up text input elements (added) ---
+        this.textInput = document.getElementById("textInput") as HTMLInputElement;
+        this.sendTextButton = document.getElementById("sendTextButton") as HTMLButtonElement;
+        if (this.sendTextButton) {
+          this.sendTextButton.addEventListener("click", () => this.handleTextSend());
+        }
+        if (this.textInput) {
+          this.textInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") this.handleTextSend();
+          });
+        }
+
         this.updateStatus('Click "Talk" or Upload an Image');
       }
 
@@ -324,6 +341,29 @@ export default function Page() {
           this.micIcon.classList.remove("fa-stop");
         }
       }
+
+      // --- New method: send text using existing session.sendClientContent ---
+      private async handleTextSend() {
+        const text = this.textInput?.value?.trim();
+        if (!text) return;
+
+        // Ensure connected before sending
+        const connected = await this.connectToGeminiIfNeeded();
+        if (!connected || !this.isSetupComplete) {
+          this.updateStatus("Not connected yet.", true);
+          return;
+        }
+
+        try {
+          // send as a client content turn (text only)
+          this.session?.sendClientContent({ turns: text });
+          this.updateStatus("Message sent.");
+          if (this.textInput) this.textInput.value = "";
+        } catch (e) {
+          console.error("Text send error:", e);
+          this.updateStatus("Failed to send text.", true);
+        }
+      }
     }
 
     new GeminiLiveVoiceApp();
@@ -376,6 +416,25 @@ export default function Page() {
               >
                 ×
               </button>
+            </div>
+
+            {/* --- WhatsApp-style chat input added below (text-only send) --- */}
+            <div className="mt-3 w-full">
+              <div className="w-full flex items-center bg-[#222222] rounded-full border border-white/8 px-3 py-2">
+                <input
+                  id="textInput"
+                  type="text"
+                  placeholder="Type a message..."
+                  className="flex-1 bg-transparent text-white text-sm outline-none placeholder-gray-500"
+                />
+                <button
+                  id="sendTextButton"
+                  className="ml-2 bg-[#82aaff] hover:bg-[#6c8edf] text-white rounded-full p-2 transition-colors"
+                  title="Send"
+                >
+                  <i className="fas fa-paper-plane"></i>
+                </button>
+              </div>
             </div>
           </div>
         </div>
