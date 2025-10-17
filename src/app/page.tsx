@@ -15,201 +15,147 @@ const TARGET_SAMPLE_RATE = 16000;
 const WORKLET_BUFFER_SIZE = 4096;
 const IMAGE_SEND_INTERVAL_MS = 5000;
 
-// --- Helper functions ---
+// --- Helpers ---
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   let binary = "";
   const bytes = new Uint8Array(buffer);
   for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
   return window.btoa(binary);
 }
-
 function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binaryString = window.atob(base64);
-  const len = binaryString.length;
+  const binary = window.atob(base64);
+  const len = binary.length;
   const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
+  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
 }
 
-// --- Main Component ---
 export default function Page() {
   useEffect(() => {
-    if (!API_KEY) {
-      console.error("Missing NEXT_PUBLIC_GEMINI_API_KEY");
-      return;
-    }
+    if (!API_KEY) return console.error("Missing NEXT_PUBLIC_GEMINI_API_KEY");
 
     class GeminiLiveVoiceApp {
-      private genAI: GoogleGenAI;
-      private recordButton: HTMLButtonElement;
-      private micIcon: HTMLElement;
-      private recordText: HTMLElement;
-      private recordingStatus: HTMLSpanElement;
-      private recordWavesSVG: SVGSVGElement | null;
-      private imageUploadInput: HTMLInputElement;
-      private imagePreviewContainer: HTMLDivElement;
-      private imagePreview: HTMLImageElement;
-      private removeImageButton: HTMLButtonElement;
-      private currentImageBase64: string | null = null;
-      private currentImageMimeType: string | null = null;
+      private genAI = new GoogleGenAI({ apiKey: API_KEY!, apiVersion: "v1alpha" });
+      private recordButton = document.getElementById("recordButton") as HTMLButtonElement;
+      private micIcon = document.getElementById("micIcon")!;
+      private recordText = document.getElementById("recordText")!;
+      private statusEl = document.getElementById("recordingStatus") as HTMLSpanElement;
+      private imageInput = document.getElementById("imageUpload") as HTMLInputElement;
+      private imagePreview = document.getElementById("imagePreview") as HTMLImageElement;
+      private imageContainer = document.getElementById("imagePreviewContainer") as HTMLDivElement;
+      private removeImageBtn = document.getElementById("removeImageButton") as HTMLButtonElement;
+      private transcriptionEl = document.getElementById("transcription") as HTMLDivElement;
       private session: Session | null = null;
-      private isRecording = false;
-      private audioContext: AudioContext | null = null;
+      private audioCtx: AudioContext | null = null;
       private micStream: MediaStream | null = null;
-      private micSourceNode: MediaStreamAudioSourceNode | null = null;
-      private audioWorkletNode: AudioWorkletNode | null = null;
+      private micSource: MediaStreamAudioSourceNode | null = null;
+      private worklet: AudioWorkletNode | null = null;
       private audioQueue: ArrayBuffer[] = [];
-      private isPlayingAudio = false;
-      private isSetupComplete = false;
-      private imageSendIntervalId: number | null = null;
-
-      // --- Text chat ---
-      private chatContainer: HTMLDivElement;
+      private isRecording = false;
+      private isPlaying = false;
+      private isSetup = false;
+      private imgData: { base64: string; type: string } | null = null;
+      private imgTimer: number | null = null;
 
       constructor() {
-        this.genAI = new GoogleGenAI({ apiKey: API_KEY!, apiVersion: "v1alpha" });
-
-        this.recordButton = document.getElementById("recordButton") as HTMLButtonElement;
-        this.micIcon = document.getElementById("micIcon")!;
-        this.recordText = document.getElementById("recordText")!;
-        this.recordingStatus = document.getElementById("recordingStatus") as HTMLSpanElement;
-        this.recordWavesSVG = document.querySelector(".record-waves") as SVGSVGElement | null;
-        this.imageUploadInput = document.getElementById("imageUpload") as HTMLInputElement;
-        this.imagePreviewContainer = document.getElementById("imagePreviewContainer") as HTMLDivElement;
-        this.imagePreview = document.getElementById("imagePreview") as HTMLImageElement;
-        this.removeImageButton = document.getElementById("removeImageButton") as HTMLButtonElement;
-        this.chatContainer = document.getElementById("chatContainer") as HTMLDivElement;
-
         this.recordButton.addEventListener("click", () => this.toggleRecording());
-        this.imageUploadInput.addEventListener("change", (e) => this.handleImageUpload(e));
-        this.removeImageButton.addEventListener("click", () => this.removeImage());
-
-        // Listen for text input
+        this.imageInput.addEventListener("change", (e) => this.handleImage(e));
+        this.removeImageBtn.addEventListener("click", () => this.clearImage());
         window.addEventListener("sendTextMessage", (e: Event) => {
-          const value = (e as CustomEvent<string>).detail;
-          this.sendTextMessage(value);
+          const val = (e as CustomEvent<string>).detail;
+          this.sendText(val);
         });
-
-        this.updateStatus('Click "Talk" or Upload an Image');
+        this.setStatus('Click "Talk" or Upload an Image');
       }
 
-      private updateStatus(msg: string, err = false) {
-        this.recordingStatus.textContent = msg;
-        this.recordingStatus.style.color = err ? "#ff453a" : "#A8A8A8";
-        if (err) console.error(msg);
+      private setStatus(msg: string, err = false) {
+        this.statusEl.textContent = msg;
+        this.statusEl.style.color = err ? "#ff453a" : "#A8A8A8";
       }
 
-      private showTranscription(text: string) {
-        const transcriptEl = document.getElementById("transcription");
-        if (!transcriptEl) return;
-        transcriptEl.textContent = text;
+      private showText(txt: string) {
+        this.transcriptionEl.textContent = txt;
       }
 
-      private appendMessage(text: string, fromAI = false) {
-        const div = document.createElement("div");
-        div.textContent = text;
-        div.className = `p-2 rounded ${
-          fromAI ? "bg-[#82aaff] text-white self-start" : "bg-[#4a4a4a] text-white self-end"
-        }`;
-        div.style.alignSelf = fromAI ? "flex-start" : "flex-end";
-        this.chatContainer.appendChild(div);
-        this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
+      private async sendText(msg: string) {
+        this.showText("");
+        if (!this.session) await this.connect();
+        this.session?.sendClientContent({ turns: msg });
       }
 
-      private async sendTextMessage(message: string) {
-        this.appendMessage(message); // Show user message
-
-        if (!this.session) {
-          await this.connectToGeminiIfNeeded();
-        }
-
-        if (this.session) {
-          // ✅ Official Gemini audio-only input (text turns)
-          this.session.sendClientContent({ turns: message });
-          // AI response audio handled by existing onmessage
-        }
-      }
-
-      private async handleImageUpload(e: Event) {
-        const target = e.target as HTMLInputElement;
-        if (!target.files?.[0]) return;
-        const img = target.files[0];
-        const mimeType = img.type;
-        const valid = ["image/jpeg", "image/png", "image/webp"];
-        if (!valid.includes(mimeType)) {
-          this.updateStatus("Invalid image type.", true);
-          return this.removeImage();
-        }
+      private async handleImage(e: Event) {
+        const file = (e.target as HTMLInputElement).files?.[0];
+        if (!file) return;
+        if (!["image/png", "image/jpeg", "image/webp"].includes(file.type))
+          return this.setStatus("Invalid image type", true);
         const reader = new FileReader();
         reader.onload = (ev) => {
-          const base64Full = ev.target?.result as string;
-          this.currentImageBase64 = base64Full.split(",")[1];
-          this.currentImageMimeType = mimeType;
-          this.imagePreview.src = base64Full;
-          this.imagePreviewContainer.style.display = "block";
-          this.updateStatus("Image loaded. It will be sent periodically during voice chat.");
+          const base64 = (ev.target?.result as string).split(",")[1];
+          this.imgData = { base64, type: file.type };
+          this.imagePreview.src = ev.target?.result as string;
+          this.imageContainer.style.display = "block";
+          this.setStatus("Image ready — will send during voice chat.");
         };
-        reader.readAsDataURL(img);
+        reader.readAsDataURL(file);
       }
 
-      private removeImage() {
-        this.currentImageBase64 = null;
-        this.currentImageMimeType = null;
+      private clearImage() {
+        this.imgData = null;
         this.imagePreview.src = "#";
-        this.imagePreviewContainer.style.display = "none";
-        this.imageUploadInput.value = "";
-        this.updateStatus('Image removed. Click "Talk" or Upload an Image');
+        this.imageContainer.style.display = "none";
+        this.imageInput.value = "";
+        this.setStatus('Image removed. Click "Talk" or Upload an Image');
       }
 
-      private startPeriodicImageSending() {
-        if (this.imageSendIntervalId) clearInterval(this.imageSendIntervalId);
-        if (!this.session || !this.isSetupComplete || !this.isRecording) return;
-        this.imageSendIntervalId = window.setInterval(() => this.sendPeriodicImageData(), IMAGE_SEND_INTERVAL_MS);
-        if (this.currentImageBase64 && this.currentImageMimeType) this.sendPeriodicImageData();
+      private startImageLoop() {
+        if (this.imgTimer) clearInterval(this.imgTimer);
+        if (!this.session || !this.isSetup || !this.isRecording) return;
+        this.imgTimer = window.setInterval(() => this.sendImage(), IMAGE_SEND_INTERVAL_MS);
+        if (this.imgData) this.sendImage();
       }
 
-      private stopPeriodicImageSending() {
-        if (this.imageSendIntervalId) clearInterval(this.imageSendIntervalId);
+      private stopImageLoop() {
+        if (this.imgTimer) clearInterval(this.imgTimer);
       }
 
-      private sendPeriodicImageData() {
-        if (!this.session || !this.isRecording || !this.currentImageBase64) return;
-        const blob: GenAIBlob = { data: this.currentImageBase64!, mimeType: this.currentImageMimeType! };
+      private sendImage() {
+        if (!this.session || !this.isRecording || !this.imgData) return;
+        const blob: GenAIBlob = { data: this.imgData.base64, mimeType: this.imgData.type };
         this.session.sendRealtimeInput({ media: blob });
       }
 
-      private async initializeAudioSystem() {
-        if (!this.audioContext) {
-          this.audioContext = new (
-            window.AudioContext ||
-            (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-          )();
-          if (this.audioContext.state === "suspended") await this.audioContext.resume();
+      private async setupAudio() {
+        if (!this.audioCtx) {
+          this.audioCtx = new (window.AudioContext ||
+            (window as any).webkitAudioContext)();
           const workletCode = `
             class AudioProcessor extends AudioWorkletProcessor {
-              constructor(o){super();this.sampleRate=sampleRate;this.targetSampleRate=o.processorOptions.targetSampleRate||16000;this.bufferSize=o.processorOptions.bufferSize||4096;
-              this._buffer=new Float32Array(this.bufferSize*4);this._index=0;this.resampleRatio=this.sampleRate/this.targetSampleRate;}
-              process(i){const c=i[0]?.[0];if(c){if(this._index+c.length<=this._buffer.length){this._buffer.set(c,this._index);this._index+=c.length;}}
-              if(this._index>=this.bufferSize*this.resampleRatio)this.flush();return true;}
+              constructor(o){super();this.sampleRate=sampleRate;
+                this.targetRate=o.processorOptions.targetSampleRate||16000;
+                this.bufferSize=o.processorOptions.bufferSize||4096;
+                this.buf=new Float32Array(this.bufferSize*4);this.idx=0;
+                this.ratio=this.sampleRate/this.targetRate;}
+              process(i){const c=i[0]?.[0];
+                if(c){if(this.idx+c.length<=this.buf.length){this.buf.set(c,this.idx);this.idx+=c.length;}}
+                if(this.idx>=this.bufferSize*this.ratio)this.flush();return true;}
               flush(){const o=new Float32Array(this.bufferSize);
-              for(let i=0;i<this.bufferSize;i++){const P=i*this.resampleRatio;const K=Math.floor(P);const T=P-K;o[i]=this._buffer[K]*(1-T)+(this._buffer[K+1]||0)*T;}
-              const pcm=new Int16Array(o.length);for(let i=0;i<o.length;i++){pcm[i]=Math.max(-1,Math.min(1,o[i]))*32767;}
-              this.port.postMessage({pcmData:pcm.buffer},[pcm.buffer]);this._buffer.copyWithin(0,this.bufferSize*this.resampleRatio,this._index);this._index-=this.bufferSize*this.resampleRatio;}
+                for(let i=0;i<this.bufferSize;i++){const p=i*this.ratio;
+                  const k=Math.floor(p);const t=p-k;
+                  o[i]=this.buf[k]*(1-t)+(this.buf[k+1]||0)*t;}
+                const pcm=new Int16Array(o.length);
+                for(let i=0;i<o.length;i++)pcm[i]=Math.max(-1,Math.min(1,o[i]))*32767;
+                this.port.postMessage({pcmData:pcm.buffer},[pcm.buffer]);
+                this.buf.copyWithin(0,this.bufferSize*this.ratio,this.idx);
+                this.idx-=this.bufferSize*this.ratio;}
             }registerProcessor("audio-processor",AudioProcessor);
           `;
           const blob = new Blob([workletCode], { type: "application/javascript" });
-          await this.audioContext.audioWorklet.addModule(URL.createObjectURL(blob));
-        } else if (this.audioContext.state === "suspended") await this.audioContext.resume();
-        return true;
+          await this.audioCtx.audioWorklet.addModule(URL.createObjectURL(blob));
+        } else if (this.audioCtx.state === "suspended") await this.audioCtx.resume();
       }
 
-      private async connectToGeminiIfNeeded() {
-        if (this.session && this.isSetupComplete) return true;
-        return this.connectToGemini();
-      }
-
-      private async connectToGemini() {
-        this.updateStatus("Connecting to Gemini...");
+      private async connect() {
+        this.setStatus("Connecting...");
         try {
           if (this.session) this.session.close();
           this.session = await this.genAI.live.connect({
@@ -217,165 +163,140 @@ export default function Page() {
             config: {
               responseModalities: [Modality.AUDIO],
               outputAudioTranscription: {},
-              // <- Added realtimeInputConfig with automatic activity detection
               realtimeInputConfig: {
                 automaticActivityDetection: {
                   disabled: false,
                   startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_LOW,
                   endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_LOW,
-                  prefixPaddingMs: 20,
-                  silenceDurationMs: 100,
                 },
               },
             },
             callbacks: {
-              onopen: () => this.updateStatus("Connected to Gemini! Finalizing setup..."),
+              onopen: () => this.setStatus("Connected. Ready."),
               onmessage: (msg) => {
                 if (msg?.setupComplete) {
-                  this.isSetupComplete = true;
-                  this.updateStatus("Ready to talk or Upload Image");
-                  if (this.isRecording) this.startRecording();
+                  this.isSetup = true;
+                  this.setStatus("Ready to talk or Upload Image");
                 }
-
                 if (msg?.serverContent?.modelTurn?.parts)
                   msg.serverContent.modelTurn.parts.forEach((p) => {
                     if (p.inlineData?.data)
-                      this.enqueueAudio(base64ToArrayBuffer(p.inlineData.data as string));
+                      this.enqueue(base64ToArrayBuffer(p.inlineData.data));
                   });
-
-                if (msg?.serverContent?.outputTranscription?.text) {
-                  this.showTranscription(msg.serverContent.outputTranscription.text);
-                  // Optional: show as AI text in chat
-                  this.appendMessage(msg.serverContent.outputTranscription.text, true);
-                }
+                if (msg?.serverContent?.outputTranscription?.text)
+                  this.showText(msg.serverContent.outputTranscription.text);
+                if (msg?.serverContent?.turnComplete)
+                  this.setStatus("Turn complete. Ready for next input.");
               },
               onerror: (e) => {
-                console.error("WebSocket error", e);
-                this.updateStatus("WebSocket Error", true);
+                console.error(e);
+                this.setStatus("Error", true);
                 this.cleanup();
               },
               onclose: () => {
                 this.cleanup();
-                this.updateStatus("Disconnected.");
+                this.setStatus("Disconnected");
               },
             },
           });
-          return true;
-        } catch (e) {
-          this.updateStatus("Connection failed.", true);
+        } catch {
+          this.setStatus("Connection failed", true);
           this.cleanup();
-          return false;
         }
       }
 
-      private enqueueAudio(buf: ArrayBuffer) {
+      private enqueue(buf: ArrayBuffer) {
         this.audioQueue.push(buf);
-        if (!this.isPlayingAudio) this.playNext();
+        if (!this.isPlaying) this.play();
       }
 
-      private async playNext() {
+      private async play() {
         if (this.audioQueue.length === 0) {
-          this.isPlayingAudio = false;
-          this.updateStatus(this.isRecording ? "Listening..." : "Ready to talk or Upload Image");
+          this.isPlaying = false;
           return;
         }
-        this.isPlayingAudio = true;
+        this.isPlaying = true;
+        if (!this.audioCtx) await this.setupAudio();
         const buf = this.audioQueue.shift()!;
-        if (!this.audioContext) await this.initializeAudioSystem();
         const PLAYBACK_SR = 24000;
         const int16 = new Int16Array(buf);
         const f32 = new Float32Array(int16.length);
         for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
-        const audioBuffer = this.audioContext!.createBuffer(1, f32.length, PLAYBACK_SR);
-        audioBuffer.copyToChannel(f32, 0);
-        const src = this.audioContext!.createBufferSource();
-        src.buffer = audioBuffer;
-        src.connect(this.audioContext!.destination);
+        const audioBuf = this.audioCtx!.createBuffer(1, f32.length, PLAYBACK_SR);
+        audioBuf.copyToChannel(f32, 0);
+        const src = this.audioCtx!.createBufferSource();
+        src.buffer = audioBuf;
+        src.connect(this.audioCtx!.destination);
         src.start();
-        src.onended = () => this.playNext();
-        this.updateStatus("Playing Gemini response...");
+        src.onended = () => this.play();
       }
 
       private cleanup() {
         this.isRecording = false;
-        this.isSetupComplete = false;
-        this.stopPeriodicImageSending();
-        this.cleanupAudio();
-        this.audioQueue = [];
-        this.isPlayingAudio = false;
-        this.updateButtonUI();
-      }
-
-      private cleanupAudio() {
-        this.audioWorkletNode?.disconnect();
-        this.micSourceNode?.disconnect();
+        this.isSetup = false;
+        this.stopImageLoop();
         this.micStream?.getTracks().forEach((t) => t.stop());
-        this.audioWorkletNode = null;
-        this.micSourceNode = null;
-        this.micStream = null;
+        this.session?.close();
+        this.audioQueue = [];
+        this.isPlaying = false;
+        this.updateButton();
       }
 
       private async toggleRecording() {
-        const ok = await this.initializeAudioSystem();
-        if (!ok) return this.updateStatus("Audio init failed", true);
-        if (this.isRecording) this.stopRecording();
+        await this.setupAudio();
+        if (this.isRecording) this.stop();
         else {
+          this.showText("");
           this.isRecording = true;
-          this.updateButtonUI();
-          await this.startRecording();
+          this.updateButton();
+          await this.start();
         }
       }
 
-      private async startRecording() {
-        const connected = await this.connectToGeminiIfNeeded();
-        if (!connected || !this.isSetupComplete) {
-          this.updateStatus("Waiting for connection setup...");
-          return;
-        }
+      private async start() {
+        await this.connect();
+        if (!this.isSetup) return this.setStatus("Setting up...");
         try {
           this.micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
-          this.micSourceNode = this.audioContext!.createMediaStreamSource(this.micStream);
-          this.audioWorkletNode = new AudioWorkletNode(this.audioContext!, "audio-processor", {
+          this.micSource = this.audioCtx!.createMediaStreamSource(this.micStream);
+          this.worklet = new AudioWorkletNode(this.audioCtx!, "audio-processor", {
             processorOptions: { targetSampleRate: TARGET_SAMPLE_RATE, bufferSize: WORKLET_BUFFER_SIZE },
           });
-          this.audioWorkletNode.port.onmessage = (ev) => {
-            if (ev.data.pcmData && this.session && this.isRecording) {
-              const base64Audio = arrayBufferToBase64(ev.data.pcmData);
-              const blob: GenAIBlob = { data: base64Audio, mimeType: `audio/pcm;rate=${TARGET_SAMPLE_RATE}` };
-              this.session!.sendRealtimeInput({ media: blob });
+          this.worklet.port.onmessage = (e) => {
+            if (e.data.pcmData && this.session && this.isRecording) {
+              const b64 = arrayBufferToBase64(e.data.pcmData);
+              const blob: GenAIBlob = { data: b64, mimeType: `audio/pcm;rate=${TARGET_SAMPLE_RATE}` };
+              this.session.sendRealtimeInput({ media: blob });
             }
           };
-          this.micSourceNode.connect(this.audioWorkletNode);
-          this.updateStatus("Listening...");
-          this.startPeriodicImageSending();
-        } catch (e) {
-          console.error("Mic error", e);
-          this.updateStatus("Mic error", true);
+          this.micSource.connect(this.worklet);
+          this.setStatus("Listening...");
+          this.startImageLoop();
+        } catch {
+          this.setStatus("Mic error", true);
           this.isRecording = false;
-          this.updateButtonUI();
+          this.updateButton();
         }
       }
 
-      private stopRecording() {
+      private stop() {
         this.isRecording = false;
-        this.stopPeriodicImageSending();
-        this.updateButtonUI();
-        this.cleanupAudio();
+        this.stopImageLoop();
+        this.micStream?.getTracks().forEach((t) => t.stop());
         this.session?.close();
-        this.updateStatus("Call ended.");
+        this.setStatus("Call ended.");
+        this.updateButton();
       }
 
-      private updateButtonUI() {
+      private updateButton() {
         if (this.isRecording) {
           this.recordButton.classList.add("bg-red-500");
           this.recordText.textContent = "Stop";
-          this.micIcon.classList.remove("fa-microphone");
-          this.micIcon.classList.add("fa-stop");
+          this.micIcon.classList.replace("fa-microphone", "fa-stop");
         } else {
           this.recordButton.classList.remove("bg-red-500");
           this.recordText.textContent = "Talk";
-          this.micIcon.classList.add("fa-microphone");
-          this.micIcon.classList.remove("fa-stop");
+          this.micIcon.classList.replace("fa-stop", "fa-microphone");
         }
       }
     }
@@ -387,33 +308,16 @@ export default function Page() {
     <div className="min-h-screen flex items-center justify-center bg-[#121212] text-[#E1E1E1]">
       <div className="flex flex-col items-center space-y-6">
         <h1 className="text-3xl font-semibold">Multimodal Live Chat - YeyuLab</h1>
-
         <div className="p-6 bg-[#1E1E1E] rounded-2xl shadow-lg flex flex-col items-center">
-          <span id="recordingStatus" className="text-[#A8A8A8] mb-4">
-            Ready
-          </span>
-
-          <button
-            id="recordButton"
-            className="w-24 h-24 rounded-full bg-[#82aaff] flex flex-col justify-center items-center text-white transition-colors hover:bg-[#6c8edf] relative"
-          >
+          <span id="recordingStatus" className="text-[#A8A8A8] mb-4">Ready</span>
+          <button id="recordButton" className="w-24 h-24 rounded-full bg-[#82aaff] flex flex-col justify-center items-center text-white transition-colors hover:bg-[#6c8edf] relative">
             <i id="micIcon" className="fas fa-microphone text-3xl mb-1" />
-            <span id="recordText" className="text-sm font-medium">
-              Talk
-            </span>
-            <svg className="record-waves absolute w-40 h-40 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none hidden">
-              <circle className="wave wave1" cx="50" cy="50" r="20" />
-            </svg>
+            <span id="recordText" className="text-sm font-medium">Talk</span>
           </button>
 
-          {/* ✅ Transcription display */}
+          {/* Single-line, cleared-per-turn transcription */}
           <div id="transcription" className="mt-4 text-sm text-gray-400 max-w-xs text-center"></div>
 
-          {/* ✅ Chat messages */}
-          <div
-            id="chatContainer"
-            className="mt-4 w-80 max-h-96 overflow-y-auto bg-[#2a2a2a] rounded-lg p-4 flex flex-col space-y-2"
-          ></div>
           <input
             id="chatInput"
             type="text"
@@ -421,37 +325,24 @@ export default function Page() {
             className="mt-2 w-80 rounded px-3 py-2 bg-[#1E1E1E] text-white focus:outline-none"
             onKeyDown={(e) => {
               if (e.key === "Enter") {
-                const input = e.currentTarget as HTMLInputElement;
-                const value = input.value.trim();
-                if (value) {
-                  window.dispatchEvent(new CustomEvent("sendTextMessage", { detail: value }));
-                  input.value = "";
+                const v = e.currentTarget.value.trim();
+                if (v) {
+                  window.dispatchEvent(new CustomEvent("sendTextMessage", { detail: v }));
+                  e.currentTarget.value = "";
                 }
               }
             }}
           />
 
           <div className="mt-6 flex flex-col items-center bg-[#2a2a2a] rounded-lg p-4 w-80 border border-white/10 space-y-3">
-            <label
-              htmlFor="imageUpload"
-              className="bg-[#82aaff] hover:bg-[#6c8edf] text-white rounded px-4 py-2 flex items-center cursor-pointer space-x-2"
-            >
+            <label htmlFor="imageUpload" className="bg-[#82aaff] hover:bg-[#6c8edf] text-white rounded px-4 py-2 flex items-center cursor-pointer space-x-2">
               <i className="fas fa-image"></i>
               <span>Upload Image</span>
             </label>
             <input id="imageUpload" type="file" accept="image/png,image/jpeg,image/webp" className="hidden" />
-            <div
-              id="imagePreviewContainer"
-              className="hidden relative border-2 border-dashed border-white/20 p-2 rounded w-full"
-            >
+            <div id="imagePreviewContainer" className="hidden relative border-2 border-dashed border-white/20 p-2 rounded w-full">
               <img id="imagePreview" src="#" alt="Preview" className="max-h-52 mx-auto rounded object-contain" />
-              <button
-                id="removeImageButton"
-                title="Remove"
-                className="absolute -top-3 -right-3 bg-red-500 text-white w-6 h-6 rounded-full text-sm font-bold"
-              >
-                ×
-              </button>
+              <button id="removeImageButton" title="Remove" className="absolute -top-3 -right-3 bg-red-500 text-white w-6 h-6 rounded-full text-sm font-bold">×</button>
             </div>
           </div>
         </div>
