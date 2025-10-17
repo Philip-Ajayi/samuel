@@ -1,6 +1,13 @@
 "use client";
 import { useEffect } from "react";
-import { GoogleGenAI, Modality, type Session, type Blob as GenAIBlob } from "@google/genai";
+import {
+  GoogleGenAI,
+  Modality,
+  StartSensitivity,
+  EndSensitivity,
+  type Session,
+  type Blob as GenAIBlob,
+} from "@google/genai";
 
 const API_KEY = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
 const MODEL_NAME = "gemini-2.0-flash-live-001";
@@ -56,6 +63,9 @@ export default function Page() {
       private isSetupComplete = false;
       private imageSendIntervalId: number | null = null;
 
+      // --- Text chat ---
+      private chatContainer: HTMLDivElement;
+
       constructor() {
         this.genAI = new GoogleGenAI({ apiKey: API_KEY!, apiVersion: "v1alpha" });
 
@@ -68,10 +78,18 @@ export default function Page() {
         this.imagePreviewContainer = document.getElementById("imagePreviewContainer") as HTMLDivElement;
         this.imagePreview = document.getElementById("imagePreview") as HTMLImageElement;
         this.removeImageButton = document.getElementById("removeImageButton") as HTMLButtonElement;
+        this.chatContainer = document.getElementById("chatContainer") as HTMLDivElement;
 
         this.recordButton.addEventListener("click", () => this.toggleRecording());
         this.imageUploadInput.addEventListener("change", (e) => this.handleImageUpload(e));
         this.removeImageButton.addEventListener("click", () => this.removeImage());
+
+        // Listen for text input
+        window.addEventListener("sendTextMessage", (e: Event) => {
+          const value = (e as CustomEvent<string>).detail;
+          this.sendTextMessage(value);
+        });
+
         this.updateStatus('Click "Talk" or Upload an Image');
       }
 
@@ -81,11 +99,35 @@ export default function Page() {
         if (err) console.error(msg);
       }
 
-      // --- ✅ Show transcription live ---
       private showTranscription(text: string) {
         const transcriptEl = document.getElementById("transcription");
         if (!transcriptEl) return;
         transcriptEl.textContent = text;
+      }
+
+      private appendMessage(text: string, fromAI = false) {
+        const div = document.createElement("div");
+        div.textContent = text;
+        div.className = `p-2 rounded ${
+          fromAI ? "bg-[#82aaff] text-white self-start" : "bg-[#4a4a4a] text-white self-end"
+        }`;
+        div.style.alignSelf = fromAI ? "flex-start" : "flex-end";
+        this.chatContainer.appendChild(div);
+        this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
+      }
+
+      private async sendTextMessage(message: string) {
+        this.appendMessage(message); // Show user message
+
+        if (!this.session) {
+          await this.connectToGeminiIfNeeded();
+        }
+
+        if (this.session) {
+          // ✅ Official Gemini audio-only input (text turns)
+          this.session.sendClientContent({ turns: message });
+          // AI response audio handled by existing onmessage
+        }
       }
 
       private async handleImageUpload(e: Event) {
@@ -174,7 +216,17 @@ export default function Page() {
             model: MODEL_NAME,
             config: {
               responseModalities: [Modality.AUDIO],
-              outputAudioTranscription: {}, // ✅ Enable live transcription
+              outputAudioTranscription: {},
+              // <- Added realtimeInputConfig with automatic activity detection
+              realtimeInputConfig: {
+                automaticActivityDetection: {
+                  disabled: false,
+                  startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_LOW,
+                  endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_LOW,
+                  prefixPaddingMs: 20,
+                  silenceDurationMs: 100,
+                },
+              },
             },
             callbacks: {
               onopen: () => this.updateStatus("Connected to Gemini! Finalizing setup..."),
@@ -193,6 +245,8 @@ export default function Page() {
 
                 if (msg?.serverContent?.outputTranscription?.text) {
                   this.showTranscription(msg.serverContent.outputTranscription.text);
+                  // Optional: show as AI text in chat
+                  this.appendMessage(msg.serverContent.outputTranscription.text, true);
                 }
               },
               onerror: (e) => {
@@ -354,6 +408,28 @@ export default function Page() {
 
           {/* ✅ Transcription display */}
           <div id="transcription" className="mt-4 text-sm text-gray-400 max-w-xs text-center"></div>
+
+          {/* ✅ Chat messages */}
+          <div
+            id="chatContainer"
+            className="mt-4 w-80 max-h-96 overflow-y-auto bg-[#2a2a2a] rounded-lg p-4 flex flex-col space-y-2"
+          ></div>
+          <input
+            id="chatInput"
+            type="text"
+            placeholder="Type a message..."
+            className="mt-2 w-80 rounded px-3 py-2 bg-[#1E1E1E] text-white focus:outline-none"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                const input = e.currentTarget as HTMLInputElement;
+                const value = input.value.trim();
+                if (value) {
+                  window.dispatchEvent(new CustomEvent("sendTextMessage", { detail: value }));
+                  input.value = "";
+                }
+              }
+            }}
+          />
 
           <div className="mt-6 flex flex-col items-center bg-[#2a2a2a] rounded-lg p-4 w-80 border border-white/10 space-y-3">
             <label
