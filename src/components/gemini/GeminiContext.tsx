@@ -40,7 +40,6 @@ interface GeminiContextValue {
 }
 
 const GeminiContext = createContext<GeminiContextValue | null>(null);
-
 export const useGemini = (): GeminiContextValue => {
   const ctx = useContext(GeminiContext);
   if (!ctx) throw new Error("useGemini must be used inside GeminiProvider");
@@ -64,103 +63,54 @@ export const GeminiProvider: React.FC<PropsWithChildren> = ({ children }) => {
   const micSourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const audioWorkletNodeRef = useRef<AudioWorkletNode | null>(null);
 
+  // ------------------ Utility ------------------
+
+  const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
+    let binary = "";
+    const bytes = new Uint8Array(buffer);
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+  };
+
+  const base64ToArrayBuffer = (base64: string): ArrayBuffer => {
+    const binary = atob(base64);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+  };
+
+  const fileToBase64 = (file: File): Promise<string> =>
+    new Promise((res, rej) => {
+      const reader = new FileReader();
+      reader.onload = () => res(reader.result as string);
+      reader.onerror = rej;
+      reader.readAsDataURL(file);
+    });
+
+  // ------------------ Connection ------------------
+
   useEffect(() => {
     if (!API_KEY) {
       console.error("Missing NEXT_PUBLIC_GEMINI_API_KEY");
       return;
     }
-    if (!genAIRef.current) {
-      genAIRef.current = new GoogleGenAI({ apiKey: API_KEY, apiVersion: "v1alpha" });
-    }
+    if (!genAIRef.current)
+      genAIRef.current = new GoogleGenAI({
+        apiKey: API_KEY,
+        apiVersion: "v1alpha",
+      });
   }, []);
 
-  function arrayBufferToBase64(buffer: ArrayBuffer): string {
-    const bytes = new Uint8Array(buffer);
-    let binary = "";
-    for (let i = 0; i < bytes.byteLength; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return window.btoa(binary);
-  }
-
-  function base64ToArrayBuffer(base64: string): ArrayBuffer {
-    const binaryString = window.atob(base64);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-    return bytes.buffer;
-  }
-
-  function registerAudioHandler(h: AudioHandler): () => void {
-    audioHandlersRef.current.add(h);
-    return () => audioHandlersRef.current.delete(h);
-  }
-
-  async function ensureAudioWorklet(): Promise<void> {
-    if (!audioContextRef.current) {
-      const AudioCtx =
-        window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      audioContextRef.current = new AudioCtx();
-      if (audioContextRef.current.state === "suspended") {
-        await audioContextRef.current.resume();
-      }
-
-      const workletCode = `
-        class AudioProcessor extends AudioWorkletProcessor {
-          constructor(o){
-            super();
-            this.sampleRate = sampleRate;
-            this.targetSampleRate = o.processorOptions?.targetSampleRate || ${TARGET_SAMPLE_RATE};
-            this.bufferSize = o.processorOptions?.bufferSize || ${WORKLET_BUFFER_SIZE};
-            this._buffer = new Float32Array(this.bufferSize * 4);
-            this._index = 0;
-            this.resampleRatio = this.sampleRate / this.targetSampleRate;
-          }
-          process(inputs){
-            const c = inputs[0]?.[0];
-            if (c){
-              if (this._index + c.length <= this._buffer.length){
-                this._buffer.set(c, this._index);
-                this._index += c.length;
-              }
-            }
-            if (this._index >= this.bufferSize * this.resampleRatio) this.flush();
-            return true;
-          }
-          flush(){
-            const o = new Float32Array(this.bufferSize);
-            for (let i = 0; i < this.bufferSize; i++){
-              const P = i * this.resampleRatio;
-              const K = Math.floor(P);
-              const T = P - K;
-              o[i] = (this._buffer[K] || 0) * (1 - T) + (this._buffer[K + 1] || 0) * T;
-            }
-            const pcm = new Int16Array(o.length);
-            for (let i = 0; i < o.length; i++){
-              pcm[i] = Math.max(-1, Math.min(1, o[i])) * 32767;
-            }
-            this.port.postMessage({ pcmData: pcm.buffer }, [pcm.buffer]);
-            this._buffer.copyWithin(0, this.bufferSize * this.resampleRatio, this._index);
-            this._index -= this.bufferSize * this.resampleRatio;
-          }
-        }
-        registerProcessor("audio-processor", AudioProcessor);
-      `;
-      const blob = new Blob([workletCode], { type: "application/javascript" });
-      await audioContextRef.current.audioWorklet.addModule(URL.createObjectURL(blob));
-    } else if (audioContextRef.current.state === "suspended") {
-      await audioContextRef.current.resume();
-    }
-  }
-
   async function connect(): Promise<boolean> {
-    if (connectingRef.current) return false;
-    if (!genAIRef.current) return false;
+    if (connectingRef.current || !genAIRef.current) return false;
     if (sessionRef.current && isSetupComplete) return true;
 
+    connectingRef.current = true;
     try {
-      connectingRef.current = true;
       if (sessionRef.current) sessionRef.current.close();
 
       const s = await genAIRef.current.live.connect({
@@ -171,171 +121,228 @@ export const GeminiProvider: React.FC<PropsWithChildren> = ({ children }) => {
         },
         callbacks: {
           onopen: () => {
-            console.log("Gemini connected ✅");
+            console.log("✅ Gemini connected");
             setIsConnected(true);
-            connectingRef.current = false;
           },
-          onmessage: (msg: unknown) => {
-            const message = msg as {
-              setupComplete?: boolean;
-              serverContent?: {
-                modelTurn?: { parts?: Array<{ inlineData?: { data?: string } }> };
-                outputTranscription?: { text?: string };
-              };
-            };
-            if (message.setupComplete) setIsSetupComplete(true);
-            const parts = message.serverContent?.modelTurn?.parts;
+          onmessage: (msg: any) => {
+            if (msg.setupComplete) {
+              console.log("✅ Setup complete");
+              setIsSetupComplete(true);
+            }
+
+            const parts = msg.serverContent?.modelTurn?.parts;
             if (parts) {
-              parts.forEach((p) => {
+              for (const p of parts) {
                 const data = p.inlineData?.data;
                 if (data) {
                   const ab = base64ToArrayBuffer(data);
                   audioHandlersRef.current.forEach((h) => h(ab));
                 }
-              });
+              }
             }
-            const text = message.serverContent?.outputTranscription?.text;
+
+            const text = msg.serverContent?.outputTranscription?.text;
             if (text) setTranscription(text);
           },
           onerror: (e: Event) => {
-            console.error("Gemini websocket error", e);
-            setIsConnected(false);
-            connectingRef.current = false;
-          },
-          onclose: () => {
-            console.log("Gemini closed ❌");
+            console.error("❌ Gemini websocket error", e);
             setIsConnected(false);
             setIsSetupComplete(false);
-            connectingRef.current = false;
+          },
+          onclose: () => {
+            console.warn("⚠️ Gemini session closed");
+            setIsConnected(false);
+            setIsSetupComplete(false);
           },
         },
       });
 
       sessionRef.current = s;
+      connectingRef.current = false;
       return true;
     } catch (err) {
       console.error("connect error", err);
-      setIsConnected(false);
-      setIsSetupComplete(false);
       connectingRef.current = false;
       return false;
     }
   }
 
   function disconnect(): void {
-    console.log("Gemini disconnecting...");
+    console.log("🔌 Disconnecting Gemini...");
     sessionRef.current?.close();
     sessionRef.current = null;
     setIsConnected(false);
     setIsSetupComplete(false);
-    connectingRef.current = false;
     stopMic();
   }
 
+  // Auto-reconnect loop
   useEffect(() => {
-    let shouldRun = true;
-    const watch = async (): Promise<void> => {
-      while (shouldRun) {
+    let running = true;
+    const loop = async () => {
+      while (running) {
         if (!paused && !isConnected && !connectingRef.current) {
           await connect();
         }
         await new Promise((r) => setTimeout(r, 3000));
       }
     };
-    void watch();
+    loop();
     return () => {
-      shouldRun = false;
+      running = false;
     };
   }, [paused, isConnected]);
 
-  async function startMic(): Promise<void> {
-    if (paused) return;
-    try {
-      await ensureAudioWorklet();
-      if (!audioContextRef.current) throw new Error("AudioContext not ready");
-      micStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
-      micSourceNodeRef.current = audioContextRef.current.createMediaStreamSource(micStreamRef.current);
-      audioWorkletNodeRef.current = new AudioWorkletNode(audioContextRef.current, "audio-processor", {
-        processorOptions: { targetSampleRate: TARGET_SAMPLE_RATE, bufferSize: WORKLET_BUFFER_SIZE },
-      });
-      audioWorkletNodeRef.current.port.onmessage = (ev: MessageEvent<{ pcmData: ArrayBuffer }>) => {
-        const { pcmData } = ev.data;
-        if (pcmData && sessionRef.current && !paused) {
-          const base64 = arrayBufferToBase64(pcmData);
-          const blob: GenAIBlob = { data: base64, mimeType: `audio/pcm;rate=${TARGET_SAMPLE_RATE}` };
-          sessionRef.current.sendRealtimeInput({ media: blob });
-        }
-      };
-      micSourceNodeRef.current.connect(audioWorkletNodeRef.current);
-    } catch (e) {
-      console.error("startMic error", e);
+  // ------------------ Audio ------------------
+
+  async function ensureAudioWorklet(): Promise<void> {
+    if (!audioContextRef.current) {
+      const Ctx =
+        window.AudioContext ||
+        (window as any).webkitAudioContext ||
+        AudioContext;
+      audioContextRef.current = new Ctx();
+      const blob = new Blob(
+        [
+          `
+          class AudioProcessor extends AudioWorkletProcessor {
+            constructor(o){
+              super();
+              this.targetRate = o.processorOptions.targetRate;
+              this.bufferSize = o.processorOptions.bufferSize;
+              this.ratio = sampleRate / this.targetRate;
+              this.buffer = new Float32Array(this.bufferSize * 4);
+              this.idx = 0;
+            }
+            process(inputs){
+              const input = inputs[0]?.[0];
+              if(!input) return true;
+              if(this.idx + input.length <= this.buffer.length){
+                this.buffer.set(input, this.idx);
+                this.idx += input.length;
+              }
+              if(this.idx >= this.bufferSize * this.ratio){
+                const out = new Float32Array(this.bufferSize);
+                for(let i=0;i<this.bufferSize;i++){
+                  const p = i * this.ratio;
+                  const k = Math.floor(p);
+                  const t = p - k;
+                  out[i] = (this.buffer[k]||0)*(1-t)+(this.buffer[k+1]||0)*t;
+                }
+                const pcm = new Int16Array(out.length);
+                for(let i=0;i<out.length;i++){
+                  pcm[i] = Math.max(-1, Math.min(1, out[i]))*32767;
+                }
+                this.port.postMessage({pcmData: pcm.buffer}, [pcm.buffer]);
+                this.buffer.copyWithin(0,this.bufferSize*this.ratio,this.idx);
+                this.idx -= this.bufferSize*this.ratio;
+              }
+              return true;
+            }
+          }
+          registerProcessor("audio-processor", AudioProcessor);
+        `,
+        ],
+        { type: "application/javascript" }
+      );
+      await audioContextRef.current.audioWorklet.addModule(
+        URL.createObjectURL(blob)
+      );
     }
   }
 
-  function stopMic(): void {
-    try {
-      audioWorkletNodeRef.current?.disconnect();
-      micSourceNodeRef.current?.disconnect();
-      micStreamRef.current?.getTracks().forEach((t) => t.stop());
-    } catch (e) {
-      console.warn("stopMic cleanup error", e);
-    }
-    audioWorkletNodeRef.current = null;
-    micSourceNodeRef.current = null;
-    micStreamRef.current = null;
+  async function startMic(): Promise<void> {
+    if (paused || !isSetupComplete || !isConnected) return;
+    await ensureAudioWorklet();
+    const ctx = audioContextRef.current!;
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1 },
+    });
+    micStreamRef.current = stream;
+    micSourceNodeRef.current = ctx.createMediaStreamSource(stream);
+    audioWorkletNodeRef.current = new AudioWorkletNode(ctx, "audio-processor", {
+      processorOptions: {
+        targetRate: TARGET_SAMPLE_RATE,
+        bufferSize: WORKLET_BUFFER_SIZE,
+      },
+    });
+    audioWorkletNodeRef.current.port.onmessage = (ev) => {
+      const { pcmData } = ev.data;
+      if (!pcmData || !sessionRef.current || paused) return;
+      const base64 = arrayBufferToBase64(pcmData);
+      const blob: GenAIBlob = {
+        data: base64,
+        mimeType: `audio/pcm;rate=${TARGET_SAMPLE_RATE}`,
+      };
+      sessionRef.current.sendRealtimeInput({ media: blob });
+    };
+    micSourceNodeRef.current.connect(audioWorkletNodeRef.current);
   }
+
+  function stopMic() {
+    audioWorkletNodeRef.current?.disconnect();
+    micSourceNodeRef.current?.disconnect();
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+  }
+
+  // ------------------ Sending data ------------------
 
   function sendImageFrame(base64: string, mimeType: string): void {
-    if (!sessionRef.current || paused) return;
+    if (!sessionRef.current || paused || !isSetupComplete) return;
     try {
       const blob: GenAIBlob = { data: base64, mimeType };
       sessionRef.current.sendRealtimeInput({ media: blob });
+      console.log("📷 Sent image frame", mimeType, base64.slice(0, 40));
     } catch (e) {
       console.error("sendImageFrame error", e);
     }
   }
 
-  async function sendTextWithOptionalImage(text: string, imageFile?: File): Promise<void> {
-    if (!sessionRef.current || paused) throw new Error("Not connected or paused");
-    try {
-      if (imageFile) {
-        const base64 = await fileToBase64(imageFile);
-        const mimeType = imageFile.type || "image/png";
-        const blob: GenAIBlob = { data: base64.split(",")[1], mimeType };
-        sessionRef.current.sendRealtimeInput({ media: blob });
-        await new Promise((r) => setTimeout(r, 200));
-      }
-      sessionRef.current.sendClientContent({ turns: text });
-    } catch (e) {
-      console.error("sendTextWithOptionalImage error", e);
+  async function sendTextWithOptionalImage(
+    text: string,
+    imageFile?: File
+  ): Promise<void> {
+    if (!sessionRef.current || paused || !isSetupComplete)
+      throw new Error("Session not ready");
+    if (imageFile) {
+      const base64 = await fileToBase64(imageFile);
+      const blob: GenAIBlob = {
+        data: base64.split(",")[1],
+        mimeType: imageFile.type,
+      };
+      sessionRef.current.sendRealtimeInput({ media: blob });
+      await new Promise((r) => setTimeout(r, 200));
     }
+    sessionRef.current.sendClientContent({ turns: text });
   }
 
-  function fileToBase64(file: File): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const r = new FileReader();
-      r.onload = () => resolve(r.result as string);
-      r.onerror = reject;
-      r.readAsDataURL(file);
-    });
-  }
+  // ------------------ Audio handlers ------------------
 
-  const ctxValue: GeminiContextValue = {
-    isConnected,
-    isSetupComplete,
-    transcription,
-    paused,
-    avatarLoaded,
-    connect,
-    disconnect,
-    startMic,
-    stopMic,
-    sendImageFrame,
-    sendTextWithOptionalImage,
-    registerAudioHandler,
-    setPaused,
-    setAvatarLoaded,
+  const registerAudioHandler = (h: AudioHandler) => {
+    audioHandlersRef.current.add(h);
+    return () => audioHandlersRef.current.delete(h);
   };
 
-  return <GeminiContext.Provider value={ctxValue}>{children}</GeminiContext.Provider>;
+  return (
+    <GeminiContext.Provider
+      value={{
+        isConnected,
+        isSetupComplete,
+        transcription,
+        paused,
+        avatarLoaded,
+        connect,
+        disconnect,
+        startMic,
+        stopMic,
+        sendImageFrame,
+        sendTextWithOptionalImage,
+        registerAudioHandler,
+        setPaused,
+        setAvatarLoaded,
+      }}
+    >
+      {children}
+    </GeminiContext.Provider>
+  );
 };
