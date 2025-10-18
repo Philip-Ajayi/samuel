@@ -13,6 +13,7 @@ import {
   Modality,
   type Session,
   type Blob as GenAIBlob,
+  type LiveServerMessage, // ✅ add correct type
 } from "@google/genai";
 
 const API_KEY = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
@@ -40,6 +41,7 @@ interface GeminiContextValue {
 }
 
 const GeminiContext = createContext<GeminiContextValue | null>(null);
+
 export const useGemini = (): GeminiContextValue => {
   const ctx = useContext(GeminiContext);
   if (!ctx) throw new Error("useGemini must be used inside GeminiProvider");
@@ -124,7 +126,8 @@ export const GeminiProvider: React.FC<PropsWithChildren> = ({ children }) => {
             console.log("✅ Gemini connected");
             setIsConnected(true);
           },
-          onmessage: (msg: any) => {
+          // ✅ Correctly typed message callback
+          onmessage: (msg: LiveServerMessage) => {
             if (msg.setupComplete) {
               console.log("✅ Setup complete");
               setIsSetupComplete(true);
@@ -199,9 +202,12 @@ export const GeminiProvider: React.FC<PropsWithChildren> = ({ children }) => {
     if (!audioContextRef.current) {
       const Ctx =
         window.AudioContext ||
-        (window as any).webkitAudioContext ||
+        (window as unknown as { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext ||
         AudioContext;
+
       audioContextRef.current = new Ctx();
+
       const blob = new Blob(
         [
           `
@@ -245,6 +251,7 @@ export const GeminiProvider: React.FC<PropsWithChildren> = ({ children }) => {
         ],
         { type: "application/javascript" }
       );
+
       await audioContextRef.current.audioWorklet.addModule(
         URL.createObjectURL(blob)
       );
@@ -266,7 +273,9 @@ export const GeminiProvider: React.FC<PropsWithChildren> = ({ children }) => {
         bufferSize: WORKLET_BUFFER_SIZE,
       },
     });
-    audioWorkletNodeRef.current.port.onmessage = (ev) => {
+    audioWorkletNodeRef.current.port.onmessage = (
+      ev: MessageEvent<{ pcmData: ArrayBuffer }>
+    ) => {
       const { pcmData } = ev.data;
       if (!pcmData || !sessionRef.current || paused) return;
       const base64 = arrayBufferToBase64(pcmData);
@@ -279,7 +288,7 @@ export const GeminiProvider: React.FC<PropsWithChildren> = ({ children }) => {
     micSourceNodeRef.current.connect(audioWorkletNodeRef.current);
   }
 
-  function stopMic() {
+  function stopMic(): void {
     audioWorkletNodeRef.current?.disconnect();
     micSourceNodeRef.current?.disconnect();
     micStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -318,7 +327,7 @@ export const GeminiProvider: React.FC<PropsWithChildren> = ({ children }) => {
 
   // ------------------ Audio handlers ------------------
 
-  const registerAudioHandler = (h: AudioHandler) => {
+  const registerAudioHandler = (h: AudioHandler): (() => void) => {
     audioHandlersRef.current.add(h);
     return () => audioHandlersRef.current.delete(h);
   };
