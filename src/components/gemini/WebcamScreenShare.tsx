@@ -1,5 +1,4 @@
 // components/gemini/WebcamScreenShare.tsx
-// components/gemini/WebcamScreenShare.tsx
 "use client";
 import React, {
   useEffect,
