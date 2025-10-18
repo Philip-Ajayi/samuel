@@ -1,7 +1,19 @@
 // components/gemini/GeminiContext.tsx
 "use client";
-import React, { createContext, useContext, useEffect, useRef, useState } from "react";
-import { GoogleGenAI, Modality, type Session, type Blob as GenAIBlob } from "@google/genai";
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  PropsWithChildren,
+} from "react";
+import {
+  GoogleGenAI,
+  Modality,
+  type Session,
+  type Blob as GenAIBlob,
+} from "@google/genai";
 
 const API_KEY = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
 const MODEL_NAME = "gemini-2.0-flash-live-001";
@@ -23,18 +35,19 @@ interface GeminiContextValue {
   sendImageFrame: (base64: string, mimeType: string) => void;
   sendTextWithOptionalImage: (text: string, imageFile?: File) => Promise<void>;
   registerAudioHandler: (h: AudioHandler) => () => void;
-  setPaused: (v: boolean) => void;
-  setAvatarLoaded: (v: boolean) => void;
+  setPaused: React.Dispatch<React.SetStateAction<boolean>>;
+  setAvatarLoaded: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 const GeminiContext = createContext<GeminiContextValue | null>(null);
+
 export const useGemini = (): GeminiContextValue => {
   const ctx = useContext(GeminiContext);
   if (!ctx) throw new Error("useGemini must be used inside GeminiProvider");
   return ctx;
 };
 
-export const GeminiProvider: React.FC<React.PropsWithChildren<{}>> = ({ children }) => {
+export const GeminiProvider: React.FC<PropsWithChildren> = ({ children }) => {
   const [isConnected, setIsConnected] = useState(false);
   const [isSetupComplete, setIsSetupComplete] = useState(false);
   const [transcription, setTranscription] = useState("");
@@ -43,9 +56,8 @@ export const GeminiProvider: React.FC<React.PropsWithChildren<{}>> = ({ children
 
   const genAIRef = useRef<GoogleGenAI | null>(null);
   const sessionRef = useRef<Session | null>(null);
-  const connectingRef = useRef(false); // 🧠 new: prevents multiple concurrent connections
+  const connectingRef = useRef(false);
 
-  // audio
   const audioHandlersRef = useRef<Set<AudioHandler>>(new Set());
   const audioContextRef = useRef<AudioContext | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
@@ -57,36 +69,43 @@ export const GeminiProvider: React.FC<React.PropsWithChildren<{}>> = ({ children
       console.error("Missing NEXT_PUBLIC_GEMINI_API_KEY");
       return;
     }
-    genAIRef.current ??= new GoogleGenAI({ apiKey: API_KEY!, apiVersion: "v1alpha" });
+    if (!genAIRef.current) {
+      genAIRef.current = new GoogleGenAI({ apiKey: API_KEY, apiVersion: "v1alpha" });
+    }
   }, []);
 
-  // --- helpers ---
   function arrayBufferToBase64(buffer: ArrayBuffer): string {
-    let binary = "";
     const bytes = new Uint8Array(buffer);
-    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+    let binary = "";
+    for (let i = 0; i < bytes.byteLength; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
     return window.btoa(binary);
   }
+
   function base64ToArrayBuffer(base64: string): ArrayBuffer {
     const binaryString = window.atob(base64);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
     return bytes.buffer;
   }
 
-  // --- audio handlers registration ---
-  function registerAudioHandler(h: AudioHandler) {
+  function registerAudioHandler(h: AudioHandler): () => void {
     audioHandlersRef.current.add(h);
     return () => audioHandlersRef.current.delete(h);
   }
 
-  // --- create AudioWorklet dynamically ---
-  async function ensureAudioWorklet() {
+  async function ensureAudioWorklet(): Promise<void> {
     if (!audioContextRef.current) {
-      audioContextRef.current =
-        new (window.AudioContext || (window as any).webkitAudioContext)();
-      if (audioContextRef.current.state === "suspended") await audioContextRef.current.resume();
+      const AudioCtx =
+        window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      audioContextRef.current = new AudioCtx();
+      if (audioContextRef.current.state === "suspended") {
+        await audioContextRef.current.resume();
+      }
+
       const workletCode = `
         class AudioProcessor extends AudioWorkletProcessor {
           constructor(o){
@@ -135,7 +154,6 @@ export const GeminiProvider: React.FC<React.PropsWithChildren<{}>> = ({ children
     }
   }
 
-  // --- connect to Gemini ---
   async function connect(): Promise<boolean> {
     if (connectingRef.current) return false;
     if (!genAIRef.current) return false;
@@ -157,25 +175,29 @@ export const GeminiProvider: React.FC<React.PropsWithChildren<{}>> = ({ children
             setIsConnected(true);
             connectingRef.current = false;
           },
-          onmessage: (msg) => {
-            if ((msg as any)?.setupComplete) setIsSetupComplete(true);
-
-            // handle audio parts
-            if ((msg as any)?.serverContent?.modelTurn?.parts) {
-              (msg as any).serverContent.modelTurn.parts.forEach((p: any) => {
-                if (p.inlineData?.data) {
-                  const ab = base64ToArrayBuffer(p.inlineData.data as string);
+          onmessage: (msg: unknown) => {
+            const message = msg as {
+              setupComplete?: boolean;
+              serverContent?: {
+                modelTurn?: { parts?: Array<{ inlineData?: { data?: string } }> };
+                outputTranscription?: { text?: string };
+              };
+            };
+            if (message.setupComplete) setIsSetupComplete(true);
+            const parts = message.serverContent?.modelTurn?.parts;
+            if (parts) {
+              parts.forEach((p) => {
+                const data = p.inlineData?.data;
+                if (data) {
+                  const ab = base64ToArrayBuffer(data);
                   audioHandlersRef.current.forEach((h) => h(ab));
                 }
               });
             }
-
-            // transcription updates
-            if ((msg as any)?.serverContent?.outputTranscription?.text) {
-              setTranscription((msg as any).serverContent.outputTranscription.text);
-            }
+            const text = message.serverContent?.outputTranscription?.text;
+            if (text) setTranscription(text);
           },
-          onerror: (e) => {
+          onerror: (e: Event) => {
             console.error("Gemini websocket error", e);
             setIsConnected(false);
             connectingRef.current = false;
@@ -200,7 +222,7 @@ export const GeminiProvider: React.FC<React.PropsWithChildren<{}>> = ({ children
     }
   }
 
-  function disconnect() {
+  function disconnect(): void {
     console.log("Gemini disconnecting...");
     sessionRef.current?.close();
     sessionRef.current = null;
@@ -210,25 +232,23 @@ export const GeminiProvider: React.FC<React.PropsWithChildren<{}>> = ({ children
     stopMic();
   }
 
-  // --- reconnect loop with guard ---
   useEffect(() => {
     let shouldRun = true;
-    async function watch() {
+    const watch = async (): Promise<void> => {
       while (shouldRun) {
         if (!paused && !isConnected && !connectingRef.current) {
           await connect();
         }
         await new Promise((r) => setTimeout(r, 3000));
       }
-    }
-    watch();
+    };
+    void watch();
     return () => {
       shouldRun = false;
     };
   }, [paused, isConnected]);
 
-  // --- mic control ---
-  async function startMic() {
+  async function startMic(): Promise<void> {
     if (paused) return;
     try {
       await ensureAudioWorklet();
@@ -238,11 +258,12 @@ export const GeminiProvider: React.FC<React.PropsWithChildren<{}>> = ({ children
       audioWorkletNodeRef.current = new AudioWorkletNode(audioContextRef.current, "audio-processor", {
         processorOptions: { targetSampleRate: TARGET_SAMPLE_RATE, bufferSize: WORKLET_BUFFER_SIZE },
       });
-      audioWorkletNodeRef.current.port.onmessage = (ev) => {
-        if (ev.data?.pcmData && sessionRef.current && !paused) {
-          const base64 = arrayBufferToBase64(ev.data.pcmData);
+      audioWorkletNodeRef.current.port.onmessage = (ev: MessageEvent<{ pcmData: ArrayBuffer }>) => {
+        const { pcmData } = ev.data;
+        if (pcmData && sessionRef.current && !paused) {
+          const base64 = arrayBufferToBase64(pcmData);
           const blob: GenAIBlob = { data: base64, mimeType: `audio/pcm;rate=${TARGET_SAMPLE_RATE}` };
-          sessionRef.current!.sendRealtimeInput({ media: blob });
+          sessionRef.current.sendRealtimeInput({ media: blob });
         }
       };
       micSourceNodeRef.current.connect(audioWorkletNodeRef.current);
@@ -251,7 +272,7 @@ export const GeminiProvider: React.FC<React.PropsWithChildren<{}>> = ({ children
     }
   }
 
-  function stopMic() {
+  function stopMic(): void {
     try {
       audioWorkletNodeRef.current?.disconnect();
       micSourceNodeRef.current?.disconnect();
@@ -264,8 +285,7 @@ export const GeminiProvider: React.FC<React.PropsWithChildren<{}>> = ({ children
     micStreamRef.current = null;
   }
 
-  // --- send image frame ---
-  function sendImageFrame(base64: string, mimeType: string) {
+  function sendImageFrame(base64: string, mimeType: string): void {
     if (!sessionRef.current || paused) return;
     try {
       const blob: GenAIBlob = { data: base64, mimeType };
@@ -275,8 +295,7 @@ export const GeminiProvider: React.FC<React.PropsWithChildren<{}>> = ({ children
     }
   }
 
-  // --- send text + optional image ---
-  async function sendTextWithOptionalImage(text: string, imageFile?: File) {
+  async function sendTextWithOptionalImage(text: string, imageFile?: File): Promise<void> {
     if (!sessionRef.current || paused) throw new Error("Not connected or paused");
     try {
       if (imageFile) {
@@ -292,8 +311,8 @@ export const GeminiProvider: React.FC<React.PropsWithChildren<{}>> = ({ children
     }
   }
 
-  function fileToBase64(file: File) {
-    return new Promise<string>((resolve, reject) => {
+  function fileToBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
       const r = new FileReader();
       r.onload = () => resolve(r.result as string);
       r.onerror = reject;

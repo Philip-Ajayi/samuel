@@ -4,7 +4,17 @@ import React, { useEffect, useRef, Suspense } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { Html, Environment, useGLTF, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
+import { GLTF } from "three-stdlib";
 import { useGemini } from "./GeminiContext";
+
+// Extend the global Window interface
+declare global {
+  interface Window {
+    __fluentpath_morphInfluences?: React.MutableRefObject<Record<string, number>>;
+    __fluentpath_avgAmp?: React.MutableRefObject<number>;
+    webkitAudioContext?: typeof AudioContext;
+  }
+}
 
 type AvatarProps = {
   glbPath?: string;
@@ -13,7 +23,7 @@ type AvatarProps = {
 const visemeNames = ["mouthOpen", "mouthSmile", "eyesClosed", "eyesLookUp", "eyesLookDown"];
 
 function AvatarModel({ glbPath }: { glbPath: string }) {
-  const { scene } = useGLTF(glbPath) as any;
+  const { scene } = useGLTF(glbPath) as GLTF;
   const meshesRef = useRef<THREE.Mesh[]>([]);
   const morphInfluences = useRef<Record<string, number>>({});
   const headRef = useRef<THREE.Object3D | null>(null);
@@ -61,13 +71,13 @@ function AvatarModel({ glbPath }: { glbPath: string }) {
     });
   });
 
-  (window as any).__fluentpath_morphInfluences = morphInfluences;
-  (window as any).__fluentpath_avgAmp = avgAmp;
+  window.__fluentpath_morphInfluences = morphInfluences;
+  window.__fluentpath_avgAmp = avgAmp;
 
   return <primitive object={scene} />;
 }
 
-export default function AvatarDisplay({ glbPath = "/avatar.glb" }: { glbPath?: string }) {
+export default function AvatarDisplay({ glbPath = "/avatar.glb" }: AvatarProps) {
   const { registerAudioHandler, setAvatarLoaded } = useGemini();
   const audioCtxRef = useRef<AudioContext | null>(null);
   const playQueueRef = useRef<ArrayBuffer[]>([]);
@@ -83,7 +93,8 @@ export default function AvatarDisplay({ glbPath = "/avatar.glb" }: { glbPath?: s
 
     async function ensureAudio() {
       if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        audioCtxRef.current = new AudioCtx();
         analyserRef.current = audioCtxRef.current.createAnalyser();
         analyserRef.current.fftSize = 512;
       }
@@ -108,7 +119,10 @@ export default function AvatarDisplay({ glbPath = "/avatar.glb" }: { glbPath?: s
     }
     isPlayingRef.current = true;
     const buf = playQueueRef.current.shift()!;
-    if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    if (!audioCtxRef.current) {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      audioCtxRef.current = new AudioCtx();
+    }
     const ctx = audioCtxRef.current;
 
     const int16 = new Int16Array(buf);
@@ -125,11 +139,11 @@ export default function AvatarDisplay({ glbPath = "/avatar.glb" }: { glbPath?: s
       analyserRef.current = ctx.createAnalyser();
       analyserRef.current.fftSize = 512;
     }
-    src.connect(analyserRef.current!);
-    analyserRef.current!.connect(ctx.destination);
+    src.connect(analyserRef.current);
+    analyserRef.current.connect(ctx.destination);
 
-    const morphRef = (window as any).__fluentpath_morphInfluences as React.MutableRefObject<Record<string, number>> | undefined;
-    const avgAmpRef = (window as any).__fluentpath_avgAmp as React.MutableRefObject<number> | undefined;
+    const morphRef = window.__fluentpath_morphInfluences;
+    const avgAmpRef = window.__fluentpath_avgAmp;
 
     const updateVisemeInterval = setInterval(() => {
       if (!analyserRef.current) return;
@@ -150,7 +164,9 @@ export default function AvatarDisplay({ glbPath = "/avatar.glb" }: { glbPath?: s
     src.start();
     src.onended = () => {
       clearInterval(updateVisemeInterval);
-      try { analyserRef.current?.disconnect(); } catch (e) {}
+      try {
+        analyserRef.current?.disconnect();
+      } catch (e) {}
       playNext();
     };
   }
