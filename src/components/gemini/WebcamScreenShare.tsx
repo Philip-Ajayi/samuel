@@ -1,4 +1,5 @@
 // components/gemini/WebcamScreenShare.tsx
+// components/gemini/WebcamScreenShare.tsx
 "use client";
 import React, {
   useEffect,
@@ -98,7 +99,7 @@ const WebcamScreenShare = forwardRef<WebcamScreenShareHandle>((_props, ref) => {
     if (activeMode === "webcam") stopAll();
 
     try {
-      // @ts-ignore - Some browsers don't have proper type for getDisplayMedia
+      // @ts-expect-error - Some browsers don't have proper type for getDisplayMedia
       const s: MediaStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: false,
