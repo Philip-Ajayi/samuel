@@ -98,7 +98,7 @@ const WebcamScreenShare = forwardRef<WebcamScreenShareHandle>((_props, ref) => {
     if (activeMode === "webcam") stopAll();
 
     try {
-      // @ts-expect-error - Some browsers don't have proper type for getDisplayMedia
+     
       const s: MediaStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: false,
